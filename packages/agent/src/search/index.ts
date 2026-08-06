@@ -1,14 +1,9 @@
-import type { Session } from "../harness/session/session.ts";
-import {
-	type Entry,
-	type SessionCreateOptions,
-	SessionError,
-	type SessionMetadata,
-	type SessionRepo,
-} from "../harness/session/types.ts";
+import type { Entry, EntryQuery, SessionMetadata } from "../harness/session/types.ts";
+import { SessionError } from "../harness/session/types.ts";
 import type { FileError, Result } from "../harness/types.ts";
 
 type MaybePromise<T> = T | Promise<T>;
+type MaybeAsyncIterable<T> = Iterable<T> | AsyncIterable<T>;
 type FeedProjectionResult<TItem> = TItem | readonly TItem[] | undefined;
 
 export interface SessionSearchOptions {
@@ -38,9 +33,23 @@ export interface IndexedSessionSearch<TMetadata extends SessionMetadata = Sessio
 	extends SessionSearch<TMetadata>,
 		SearchIndexWriter<TItem> {}
 
-export interface SessionSearchSource<TMetadata extends SessionMetadata = SessionMetadata, TListOptions = unknown> {
-	list(options?: TListOptions): Promise<TMetadata[]>;
-	open(metadata: TMetadata): Promise<Session<TMetadata>>;
+export interface SessionSearchReadable<TMetadata extends SessionMetadata = SessionMetadata> {
+	getMetadata(): Promise<TMetadata>;
+	findEntries(query?: EntryQuery): Promise<Entry[]>;
+}
+
+export interface SessionSearchSource<TMetadata extends SessionMetadata = SessionMetadata, TOptions = unknown> {
+	sessions(options?: TOptions): MaybeAsyncIterable<SessionSearchReadable<TMetadata>>;
+}
+
+export function createSessionListSearchSource<TMetadata extends SessionMetadata>(
+	sessions: readonly SessionSearchReadable<TMetadata>[],
+): SessionSearchSource<TMetadata, void> {
+	return {
+		sessions() {
+			return sessions;
+		},
+	};
 }
 
 export interface FeedSessionSnapshotOptions<TMetadata extends SessionMetadata, TListOptions, TItem> {
@@ -142,8 +151,7 @@ export async function feedSessionSnapshot<TMetadata extends SessionMetadata, TLi
 		}
 	};
 
-	for (const listedMetadata of await source.list(options.listOptions)) {
-		const session = await source.open(listedMetadata);
+	for await (const session of source.sessions(options.listOptions)) {
 		const metadata = await session.getMetadata();
 		if (options.projectSession) await enqueue(options.projectSession(metadata));
 		for (const entry of await session.findEntries({ order: "oldestFirst" })) {
@@ -189,10 +197,10 @@ class ScanningSessionSearch<TMetadata extends SessionMetadata = SessionMetadata,
 		const normalizedText = options.text.trim().toLowerCase();
 		if (!normalizedText || (options.limit !== undefined && options.limit <= 0)) return [];
 		const hits: SessionSearchHit<TMetadata>[] = [];
-		for (const metadata of await this.source.list()) {
+		for await (const session of this.source.sessions()) {
+			const metadata = await session.getMetadata();
 			const cwd = metadataHasCwd(metadata) ? metadata.cwd : undefined;
 			if (options.cwd !== undefined && cwd !== options.cwd) continue;
-			const session = await this.source.open(metadata);
 			for (const entry of await session.findEntries({ order: "oldestFirst" })) {
 				const payload = defaultSearchText(entry);
 				if (!payload.toLowerCase().includes(normalizedText)) continue;
@@ -213,14 +221,6 @@ function metadataHasCwd(metadata: SessionMetadata): metadata is SessionMetadata 
 	return typeof (metadata as SessionMetadata & { cwd?: unknown }).cwd === "string";
 }
 
-export function createScanningSessionSearch<
-	TMetadata extends SessionMetadata,
-	TCreateOptions extends SessionCreateOptions,
-	TListOptions,
->(source: Pick<SessionRepo<TMetadata, TCreateOptions, TListOptions>, "list" | "open">): SessionSearch<TMetadata>;
-export function createScanningSessionSearch<TMetadata extends SessionMetadata, TListOptions = unknown>(
-	source: SessionSearchSource<TMetadata, TListOptions>,
-): SessionSearch<TMetadata>;
 export function createScanningSessionSearch<TMetadata extends SessionMetadata, TListOptions = unknown>(
 	source: SessionSearchSource<TMetadata, TListOptions>,
 ): SessionSearch<TMetadata> {

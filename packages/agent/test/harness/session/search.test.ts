@@ -7,12 +7,12 @@ import {
 	InMemorySessionStorage,
 	JsonlSessionRepo,
 	Session,
-	SessionError,
 	type SessionMetadata,
 	type SessionStorage,
 } from "../../../src/harness/session/index.ts";
 import {
 	createScanningSessionSearch,
+	createSessionListSearchSource,
 	type DocumentIndexedSessionSearch,
 	feedSessionDocumentSnapshot,
 	feedSessionSnapshot,
@@ -50,19 +50,7 @@ function createMemorySession(metadata: WorkspaceMetadata): Session<WorkspaceMeta
 }
 
 function createSource(sessions: Session<WorkspaceMetadata>[]): SessionSearchSource<WorkspaceMetadata> {
-	return {
-		async list() {
-			const metadata = [];
-			for (const session of sessions) metadata.push(await session.getMetadata());
-			return metadata;
-		},
-		async open(metadata) {
-			for (const session of sessions) {
-				if ((await session.getMetadata()).id === metadata.id) return session;
-			}
-			throw new SessionError("not_found", `Missing test session ${metadata.id}`);
-		},
-	};
+	return createSessionListSearchSource(sessions);
 }
 
 class InMemoryIndexedSearch<TMetadata extends SessionMetadata> implements DocumentIndexedSessionSearch<TMetadata> {
@@ -181,7 +169,7 @@ describe("session search", () => {
 		const entryId = await session.appendMessage(message("jsonl backed auth entry"));
 		const index = new InMemoryIndexedSearch<Awaited<ReturnType<typeof session.getMetadata>>>();
 
-		await feedSessionDocumentSnapshot(repository, index);
+		await feedSessionDocumentSnapshot(createSessionListSearchSource([session]), index);
 
 		await expect(index.search({ text: "auth", cwd })).resolves.toMatchObject([
 			{ metadata: { id: "jsonl", cwd }, entryId },

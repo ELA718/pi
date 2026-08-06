@@ -5,7 +5,7 @@ flowchart TD
     App[Application / UI] -->|query| Search[SessionSearch]
     App -->|optional wiring| Feed[Backend-specific feed]
     Harness[AgentHarness] -->|committed events| App
-    Source[Session source: repo/list/remote catalog] -->|snapshot scan| Feed
+    Source[Readable session source<br/>iterator / snapshots / live sessions] -->|snapshot scan| Feed
     Feed -->|backend-owned items| Indexer[Search index writer]
     Indexer --> Index[(derived index / remote service / FTS)]
     Search -->|scan live sessions| Source
@@ -78,18 +78,27 @@ state is removed.
 
 ## Search source
 
-A search source is anything that can expose sessions to search code:
+A search source is anything that can expose **readable session views** to search
+code:
 
 ```ts
-interface SessionSearchSource<TMetadata extends SessionMetadata = SessionMetadata, TListOptions = unknown> {
-  list(options?: TListOptions): Promise<TMetadata[]>;
-  open(metadata: TMetadata): Promise<Session<TMetadata>>;
+interface SessionSearchReadable<TMetadata extends SessionMetadata = SessionMetadata> {
+  getMetadata(): Promise<TMetadata>;
+  findEntries(query?: EntryQuery): Promise<Entry[]>;
+}
+
+interface SessionSearchSource<TMetadata extends SessionMetadata = SessionMetadata, TOptions = unknown> {
+  sessions(options?: TOptions): Iterable<SessionSearchReadable<TMetadata>>
+    | AsyncIterable<SessionSearchReadable<TMetadata>>;
 }
 ```
 
-A `SessionRepo` can be used as a source because it has `list` and `open`, but that
-does not make search a repo feature. Applications may also pass an in-memory list
-of sessions, a server API, or a filtered workspace catalog.
+The source is deliberately an iterator of readable sessions, not `list()` +
+`repo.open()`. For backends such as SQLite, `repo.open()` claims the session's
+writer lease; scanning search is read-only and must not accidentally compete with
+the harness/app that already owns that writer. The application/backend decides how
+to produce readable views safely: already-open sessions, read-only snapshots, a
+remote API, or a backend-specific read iterator.
 
 ## Search backend
 
@@ -165,14 +174,22 @@ interface stays small.
 
 ## 4.1 Scanning search
 
-Scanning search receives a `SessionSearchSource`, lists sessions at query time,
-opens matching sessions, reads entries, and filters in memory.
+Scanning search receives a `SessionSearchSource`, iterates readable sessions,
+reads entries, and filters in memory.
 
 ```ts
-const search = createScanningSessionSearch({
-  list: repo.list.bind(repo),
-  open: repo.open.bind(repo),
-});
+const source = createSessionListSearchSource([alreadyOpenSession]);
+const search = createScanningSessionSearch(source);
+```
+
+A backend can also provide its own read-only iterator:
+
+```ts
+const source = {
+  async *sessions({ cwd }) {
+    yield* sqliteReadOnlySessionSnapshots({ cwd });
+  },
+};
 ```
 
 Properties:
@@ -183,8 +200,8 @@ Properties:
 - Works for memory, JSONL, SQLite, tests, and custom sources.
 - Slow for large collections; acceptable as a default/fallback.
 
-Scanning search proves search can be expressed over a list of sessions without
-extending the repository contract.
+Scanning search proves search can be expressed over readable session views without
+extending the repository contract or acquiring writer leases.
 
 ## 4.2 SQLite FTS search
 
@@ -448,20 +465,32 @@ This separation prevents search from becoming storage handling.
 
 ## Custom session backend
 
-Implement `SessionRepo`. Because `SessionRepo` already has `list` and `open`, it
-can be passed anywhere a `SessionSearchSource` is needed:
+Implement `SessionRepo` for canonical lifecycle. Do not make scanning search call
+`repo.open()` for every result: in writer-lease backends, `open()` may mean
+"claim the writer". Instead, expose a separate readable source when you want
+scanning or generic feed:
 
 ```ts
 class PostgresSessionRepo implements SessionRepo<PostgresMetadata, CreateOptions, ListOptions> {
   create(options) { /* ... */ }
-  open(metadata) { /* return Session<PostgresMetadata> */ }
+  open(metadata) { /* open for canonical session ownership */ }
   list(options) { /* return metadata[] */ }
   delete(metadata) { /* ... */ }
   fork(source, options) { /* ... */ }
 }
 
-const repo = new PostgresSessionRepo(...);
-const scanSearch = createScanningSessionSearch(repo);
+const source = {
+  async *sessions(options?: ListOptions) {
+    for (const row of await postgres.listReadableSessions(options)) {
+      yield {
+        getMetadata: async () => row.metadata,
+        findEntries: async (query) => postgres.readEntries(row.id, query),
+      };
+    }
+  },
+};
+
+const scanSearch = createScanningSessionSearch(source);
 ```
 
 No `search()` method is added to the repo.
@@ -494,7 +523,7 @@ class ElasticSessionSearch implements IndexedSessionSearch<MyMetadata, ElasticIt
 Wire canonical sessions to that backend at app level:
 
 ```ts
-await feedSessionSnapshot(repo, elastic, {
+await feedSessionSnapshot(source, elastic, {
   projectEntry: (metadata, entry) => ({
     type: "upsert",
     id: `${metadata.id}:${entry.id}`,
@@ -516,9 +545,15 @@ search, and optional document helpers:
 
 ```ts
 export type { SessionSearch, SessionSearchHit, SessionSearchOptions };
-export type { SessionSearchSource, SearchIndexWriter, IndexedSessionSearch };
+export type { SessionSearchReadable, SessionSearchSource };
+export type { SearchIndexWriter, IndexedSessionSearch };
 export type { SessionSearchDocument, SessionSearchDocumentFeedItem };
-export { createScanningSessionSearch, feedSessionSnapshot, feedSessionDocumentSnapshot };
+export {
+  createSessionListSearchSource,
+  createScanningSessionSearch,
+  feedSessionSnapshot,
+  feedSessionDocumentSnapshot,
+};
 ```
 
 The SQLite package exports its FTS implementation:
@@ -527,15 +562,18 @@ The SQLite package exports its FTS implementation:
 export { createSqliteSessionSearch };
 ```
 
-Neither package requires `SessionRepo` to grow a search method. A repo can be
-passed into search utilities as a source, but search remains an external service.
+Neither package requires `SessionRepo` to grow a search method. Search utilities
+consume readable session sources; a repo may provide such a source separately,
+but `repo.open()` is not assumed to be a read-only operation.
 
 # 12. Summary
 
 Search has three independent pieces:
 
-1. **Source** — where sessions/entries come from. This can be a repo, a list of
-   sessions, a server catalog, or live harness events owned by the application.
+1. **Source** — where readable sessions/entries come from. This can be already
+   open sessions, read-only snapshots, a server catalog, or live harness events
+   owned by the application. It is not `repo.open()` unless that operation is
+   known to be read-only for the backend.
 2. **Feed/projection** — optional connection from canonical state to an indexed
    backend. The feed item shape belongs to the backend.
 3. **Query backend** — either scans the source directly or queries a derived
