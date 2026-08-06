@@ -318,6 +318,10 @@ class ThemeSubmenu extends Container {
 			"dark",
 		);
 
+		if (this.themeOverride !== undefined) {
+			this.callbacks.onThemePreview?.(this.getThemeSetting());
+		}
+
 		if (this.mode === "automatic") {
 			this.showAutomaticMenu();
 		} else {
@@ -441,6 +445,7 @@ class ThemeSubmenu extends Container {
 		onSelect: (value: string) => void,
 	): SelectSubmenu {
 		const appearanceLabel = appearance === "light" ? "Light" : "Dark";
+		this.callbacks.onThemePreview?.(currentValue);
 		return new SelectSubmenu(
 			`${appearanceLabel} Theme`,
 			`Select the theme to use for ${appearance} terminal appearance`,
@@ -450,7 +455,7 @@ class ThemeSubmenu extends Container {
 			currentValue,
 			onSelect,
 			() => {
-				this.callbacks.onThemePreview?.(this.resolvedThemeOverride ?? this.getThemeSetting());
+				this.callbacks.onThemePreview?.(this.getThemeSetting());
 				done();
 			},
 			(value) => this.callbacks.onThemePreview?.(value),
