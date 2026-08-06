@@ -8,8 +8,12 @@ migrations, materialized views, and optional FTS search.
 await using repository = new SqliteSessionRepository(options);
 const search = createSqliteSessionSearch(options);
 const session = await repository.create({ cwd });
+await session.appendMessage(message);
+await search.apply([{ type: "rebuild" }]); // or app-level catch-up/indexing
 const hits = await search.search({ text: "needle" });
 ```
 
-The repository lazily owns one shared database connection. Search is an independent,
-query-only projection over the same canonical database.
+The repository lazily owns one shared database connection. Search is an independent
+service over the same canonical database: repositories do not expose `search()`,
+and FTS indexing is driven explicitly by the search adapter/application rather than
+canonical write triggers.

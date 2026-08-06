@@ -1,4 +1,4 @@
-import type { SessionSearch, SessionSearchHit, SessionSearchOptions } from "@earendil-works/pi-agent-core";
+import type { IndexedSessionSearch, SessionSearchHit, SessionSearchOptions } from "@earendil-works/pi-agent-core";
 import { getFileSystemResultOrThrow } from "@earendil-works/pi-agent-core";
 import { applyMigrations } from "./migrations.ts";
 import { decodeSessionMetadata, type SessionRow } from "./storage/sessions.ts";
@@ -29,14 +29,7 @@ export interface SqliteSessionSearchOptions {
 	databasePath: string;
 }
 
-function tableExists(db: SqliteDatabase, name: string): boolean {
-	return !!db
-		.prepare("SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1")
-		.get<{ found: number }>(name);
-}
-
 function ensureSearchSchema(db: SqliteDatabase): void {
-	const ftsExists = tableExists(db, "session_search_fts");
 	db.exec(`
 CREATE VIRTUAL TABLE IF NOT EXISTS session_search_fts USING fts5(
   payload,
@@ -44,22 +37,22 @@ CREATE VIRTUAL TABLE IF NOT EXISTS session_search_fts USING fts5(
   content_rowid = 'rowid',
   tokenize = 'trigram remove_diacritics 1'
 );
-CREATE TRIGGER IF NOT EXISTS session_search_fts_ai AFTER INSERT ON entries BEGIN
-  INSERT INTO session_search_fts(rowid, payload) VALUES (new.rowid, new.payload);
-END;
-CREATE TRIGGER IF NOT EXISTS session_search_fts_ad AFTER DELETE ON entries BEGIN
-  INSERT INTO session_search_fts(session_search_fts, rowid, payload) VALUES('delete', old.rowid, old.payload);
-END;
-CREATE TRIGGER IF NOT EXISTS session_search_fts_au AFTER UPDATE OF payload ON entries BEGIN
-  INSERT INTO session_search_fts(session_search_fts, rowid, payload) VALUES('delete', old.rowid, old.payload);
-  INSERT INTO session_search_fts(rowid, payload) VALUES (new.rowid, new.payload);
-END;
 `);
-	if (!ftsExists) db.exec("INSERT INTO session_search_fts(session_search_fts) VALUES('rebuild')");
+}
+
+export type SqliteSessionSearchFeedItem =
+	| { type: "rebuild" }
+	| { type: "index_session"; sessionId: string }
+	| { type: "index_entry"; sessionId: string; entryId: string }
+	| { type: "delete_session"; sessionId: string }
+	| { type: "delete_entry"; sessionId: string; entryId: string };
+
+function rebuildSearchIndex(db: SqliteDatabase): void {
+	db.prepare("INSERT INTO session_search_fts(session_search_fts) VALUES('rebuild')").run();
 }
 
 /** SQLite FTS search over a co-located canonical session database. */
-class SqliteSessionSearch implements SessionSearch<SqliteSessionMetadata> {
+class SqliteSessionSearch implements IndexedSessionSearch<SqliteSessionMetadata, SqliteSessionSearchFeedItem> {
 	private readonly options: SqliteSessionSearchOptions;
 	private databasePath: string | undefined;
 
@@ -96,9 +89,21 @@ class SqliteSessionSearch implements SessionSearch<SqliteSessionMetadata> {
 		}
 	}
 
+	async apply(items: SqliteSessionSearchFeedItem[]): Promise<void> {
+		if (items.length === 0) return;
+		const db = await this.openDatabase();
+		try {
+			db.transaction(() => {
+				rebuildSearchIndex(db);
+			});
+		} finally {
+			db.close();
+		}
+	}
+
 	async search(options: SessionSearchOptions): Promise<SessionSearchHit<SqliteSessionMetadata>[]> {
 		const text = options.text.trim();
-		if (!text) return [];
+		if (!text || (options.limit !== undefined && options.limit <= 0)) return [];
 		const db = await this.openDatabase();
 		try {
 			const query = `"${text.replaceAll('"', '""')}"`;
@@ -121,12 +126,14 @@ class SqliteSessionSearch implements SessionSearch<SqliteSessionMetadata> {
 							WHERE f.session_id = s.id AND f.kind = 'name' AND f.key IS NULL
 						)
 					WHERE session_search_fts MATCH ? AND (? IS NULL OR s.cwd = ?)
-					ORDER BY score`,
+					ORDER BY score
+					LIMIT ?`,
 				)
 				.all<SessionRow & { entry_id: string; timestamp: string; score: number }>(
 					query,
 					options.cwd ?? null,
 					options.cwd ?? null,
+					options.limit ?? -1,
 				);
 			const path = await this.getDatabasePath();
 			return rows.map((row) => ({
@@ -141,6 +148,8 @@ class SqliteSessionSearch implements SessionSearch<SqliteSessionMetadata> {
 	}
 }
 
-export function createSqliteSessionSearch(options: SqliteSessionSearchOptions): SessionSearch<SqliteSessionMetadata> {
+export function createSqliteSessionSearch(
+	options: SqliteSessionSearchOptions,
+): IndexedSessionSearch<SqliteSessionMetadata, SqliteSessionSearchFeedItem> {
 	return new SqliteSessionSearch(options);
 }
