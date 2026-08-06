@@ -8,8 +8,10 @@ migrations, materialized views, and optional FTS search.
 await using repository = new SqliteSessionRepository(options);
 const search = createSqliteSessionSearch(options);
 const session = await repository.create({ cwd });
-await session.appendMessage(message);
-await search.apply([{ type: "rebuild" }]); // or app-level catch-up/indexing
+const metadata = await session.getMetadata();
+const entryId = await session.appendMessage(message);
+await search.apply([{ type: "index_entry", sessionId: metadata.id, entryId }]);
+// Or rebuild/catch up everything: await search.apply([{ type: "rebuild" }]);
 const hits = await search.search({ text: "needle" });
 ```
 

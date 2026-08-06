@@ -80,6 +80,26 @@ describe("SQLite FTS5 session search", () => {
 		await expect(search.search({ text: 'missing "phrase"' })).resolves.toEqual([]);
 	});
 
+	it("honors result limits", async () => {
+		const root = createTempDir();
+		const env = new NodeExecutionEnv({ cwd: root });
+		const databasePath = join(root, "sessions.sqlite");
+		await using fixture = createSqliteFixture({
+			env,
+			sqlite: createNodeSqliteFactory(),
+			databasePath,
+		});
+		const { repository, search } = fixture;
+		const first = await repository.create({ cwd: root, id: "session-1" });
+		const second = await repository.create({ cwd: root, id: "session-2" });
+		await first.appendMessage(createUserMessage("Find the auth defect"));
+		await second.appendMessage(createUserMessage("Find the auth defect too"));
+		await search.apply([{ type: "rebuild" }]);
+
+		await expect(search.search({ text: "auth", limit: 1 })).resolves.toHaveLength(1);
+		await expect(search.search({ text: "auth", limit: 0 })).resolves.toEqual([]);
+	});
+
 	it("removes deleted session entries from the index", async () => {
 		const root = createTempDir();
 		const env = new NodeExecutionEnv({ cwd: root });
@@ -97,6 +117,31 @@ describe("SQLite FTS5 session search", () => {
 
 		await repository.delete(await session.getMetadata());
 
+		await expect(search.search({ text: "auth" })).resolves.toEqual([]);
+		await expect(search.apply([{ type: "delete_session", sessionId: "session-1" }])).resolves.toBeUndefined();
+		await expect(search.search({ text: "auth" })).resolves.toEqual([]);
+	});
+
+	it("applies entry delete feed items after canonical entry cleanup", async () => {
+		const root = createTempDir();
+		const env = new NodeExecutionEnv({ cwd: root });
+		const sqlite = createNodeSqliteFactory();
+		const databasePath = join(root, "sessions.sqlite");
+		await using fixture = createSqliteFixture({ env, sqlite, databasePath });
+		const { repository, search } = fixture;
+		const session = await repository.create({ cwd: root, id: "session-1" });
+		const entryId = await session.appendMessage(createUserMessage("Find the auth defect"));
+		await search.apply([{ type: "index_entry", sessionId: "session-1", entryId }]);
+		await expect(search.search({ text: "auth" })).resolves.toHaveLength(1);
+
+		const db = await sqlite.open(databasePath);
+		try {
+			await db.prepare("DELETE FROM entries WHERE session_id = ? AND id = ?").run("session-1", entryId);
+		} finally {
+			await db.close();
+		}
+
+		await expect(search.apply([{ type: "delete_entry", sessionId: "session-1", entryId }])).resolves.toBeUndefined();
 		await expect(search.search({ text: "auth" })).resolves.toEqual([]);
 	});
 
