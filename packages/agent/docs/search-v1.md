@@ -401,8 +401,8 @@ await index.apply([{ type: "delete_session", sessionId: metadata.id }]);
 ```
 
 If index cleanup fails, canonical deletion still succeeded. The app should retry
-cleanup later and/or resolve search hits back through the canonical source and
-drop `not_found` results.
+cleanup later. It may also validate a hit when the user opens it and show
+"session no longer exists" if the canonical session or entry is gone.
 
 ## Entry delete
 

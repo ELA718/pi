@@ -7,6 +7,7 @@ import {
 	InMemorySessionStorage,
 	JsonlSessionRepo,
 	Session,
+	SessionError,
 	type SessionMetadata,
 	type SessionStorage,
 } from "../../../src/harness/session/index.ts";
@@ -49,21 +50,17 @@ function createMemorySession(metadata: WorkspaceMetadata): Session<WorkspaceMeta
 }
 
 function createSource(sessions: Session<WorkspaceMetadata>[]): SessionSearchSource<WorkspaceMetadata> {
-	const byId = new Map<string, Session<WorkspaceMetadata>>();
 	return {
 		async list() {
 			const metadata = [];
-			for (const session of sessions) {
-				const value = await session.getMetadata();
-				byId.set(value.id, session);
-				metadata.push(value);
-			}
+			for (const session of sessions) metadata.push(await session.getMetadata());
 			return metadata;
 		},
 		async open(metadata) {
-			const session = byId.get(metadata.id);
-			if (!session) throw new Error(`Missing test session ${metadata.id}`);
-			return session;
+			for (const session of sessions) {
+				if ((await session.getMetadata()).id === metadata.id) return session;
+			}
+			throw new SessionError("not_found", `Missing test session ${metadata.id}`);
 		},
 	};
 }

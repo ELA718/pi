@@ -51,6 +51,18 @@ function rebuildSearchIndex(db: SqliteDatabase): void {
 	db.prepare("INSERT INTO session_search_fts(session_search_fts) VALUES('rebuild')").run();
 }
 
+function indexSessionInSearchIndex(db: SqliteDatabase, sessionId: string): void {
+	db.prepare(
+		"INSERT INTO session_search_fts(rowid, payload) SELECT rowid, payload FROM entries WHERE session_id = ?",
+	).run(sessionId);
+}
+
+function indexEntryInSearchIndex(db: SqliteDatabase, sessionId: string, entryId: string): void {
+	db.prepare(
+		"INSERT INTO session_search_fts(rowid, payload) SELECT rowid, payload FROM entries WHERE session_id = ? AND id = ?",
+	).run(sessionId, entryId);
+}
+
 /** SQLite FTS search over a co-located canonical session database. */
 class SqliteSessionSearch implements IndexedSessionSearch<SqliteSessionMetadata, SqliteSessionSearchFeedItem> {
 	private readonly options: SqliteSessionSearchOptions;
@@ -94,7 +106,23 @@ class SqliteSessionSearch implements IndexedSessionSearch<SqliteSessionMetadata,
 		const db = await this.openDatabase();
 		try {
 			db.transaction(() => {
-				rebuildSearchIndex(db);
+				for (const item of items) {
+					switch (item.type) {
+						case "rebuild":
+							rebuildSearchIndex(db);
+							break;
+						case "index_session":
+							indexSessionInSearchIndex(db, item.sessionId);
+							break;
+						case "index_entry":
+							indexEntryInSearchIndex(db, item.sessionId, item.entryId);
+							break;
+						case "delete_session":
+						case "delete_entry":
+							rebuildSearchIndex(db);
+							break;
+					}
+				}
 			});
 		} finally {
 			db.close();
