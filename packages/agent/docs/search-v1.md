@@ -591,6 +591,127 @@ Wire canonical sessions to that backend at app level with whatever projection
 that backend wants. The projection does not need to use the scanning-source
 interface; it can read canonical state through any safe backend-specific path.
 
+## Example: JSONL sessions with a remote Elasticsearch index
+
+This is the shape an application adapter would own. The core search API only
+provides `SessionSearch` and `IndexedSessionSearch<TMetadata, TItem>`; the Elastic
+item type and document shape are local to the adapter.
+
+```ts
+import { Client } from "@elastic/elasticsearch";
+import {
+  createJsonlScanningSessionSource,
+  type IndexedSessionSearch,
+  type JsonlSessionMetadata,
+  type JsonlSessionRepoOptions,
+  type SessionSearchHit,
+  type SessionSearchOptions,
+} from "@earendil-works/pi-agent-core";
+
+type ElasticSessionFeedItem =
+  | { type: "upsert"; id: string; body: ElasticSessionDoc }
+  | { type: "delete"; id: string };
+
+interface ElasticSessionDoc {
+  sessionId: string;
+  entryId: string;
+  seq: number;
+  timestamp: number;
+  cwd: string;
+  text: string;
+  metadata: JsonlSessionMetadata;
+  fields?: Record<string, unknown>;
+}
+
+class ElasticSessionSearch
+  implements IndexedSessionSearch<JsonlSessionMetadata, ElasticSessionFeedItem>
+{
+  constructor(
+    private readonly client: Client,
+    private readonly index: string,
+  ) {}
+
+  async apply(items: ElasticSessionFeedItem[]): Promise<void> {
+    const operations = items.flatMap((item) => {
+      if (item.type === "delete") {
+        return [{ delete: { _index: this.index, _id: item.id } }];
+      }
+      return [{ index: { _index: this.index, _id: item.id } }, item.body];
+    });
+
+    if (operations.length > 0) await this.client.bulk({ operations });
+  }
+
+  async flush(): Promise<void> {
+    await this.client.indices.refresh({ index: this.index });
+  }
+
+  async search(options: SessionSearchOptions): Promise<SessionSearchHit<JsonlSessionMetadata>[]> {
+    const result = await this.client.search<ElasticSessionDoc>({
+      index: this.index,
+      size: options.limit ?? 20,
+      query: {
+        bool: {
+          must: [{ match: { text: options.text } }],
+          filter: options.cwd === undefined ? [] : [{ term: { cwd: options.cwd } }],
+        },
+      },
+    });
+
+    return result.hits.hits.flatMap((hit) => {
+      if (!hit._source) return [];
+      return [{
+        metadata: hit._source.metadata,
+        entryId: hit._source.entryId,
+        timestamp: hit._source.timestamp,
+        snippet: hit._source.text,
+        score: hit._score ?? undefined,
+      }];
+    });
+  }
+}
+```
+
+A catch-up/rebuild job connects JSONL's read-only scanning source to the Elastic
+adapter. It never calls `repo.open()`:
+
+```ts
+async function indexJsonlSessionsIntoElastic(
+  jsonl: JsonlSessionRepoOptions,
+  elastic: ElasticSessionSearch,
+  options: { cwd?: string } = {},
+): Promise<void> {
+  const source = createJsonlScanningSessionSource(jsonl);
+
+  for await (const session of source.sessions({ cwd: options.cwd })) {
+    const metadata = await session.metadata();
+    for await (const candidate of session.entries()) {
+      await elastic.apply([{
+        type: "upsert",
+        id: `${metadata.id}:${candidate.entryId}`,
+        body: {
+          sessionId: metadata.id,
+          entryId: candidate.entryId,
+          seq: candidate.seq,
+          timestamp: candidate.timestamp,
+          cwd: metadata.cwd,
+          text: candidate.text,
+          metadata,
+          fields: candidate.fields,
+        },
+      }]);
+    }
+  }
+
+  await elastic.flush();
+}
+```
+
+Deletion and freshness policy remain application-owned. For example, after a
+canonical JSONL session delete, the app could enqueue one or more
+`{ type: "delete", id }` items, or periodically rebuild the remote index from the
+JSONL source.
+
 # 11. Package placement
 
 `src/search/index.ts` stays the high-level public surface and re-exports the
