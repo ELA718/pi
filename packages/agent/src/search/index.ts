@@ -1,4 +1,7 @@
-import type { Entry, EntryQuery, SessionMetadata } from "../harness/session/types.ts";
+import type { Entry, SessionMetadata, SessionStorage } from "../harness/session/types.ts";
+
+export { JsonlSessionSearchSource, jsonlSearchSessions, listJsonlSessionMetadata } from "./jsonl.ts";
+
 import { SessionError } from "../harness/session/types.ts";
 import type { FileError, Result } from "../harness/types.ts";
 
@@ -33,10 +36,10 @@ export interface IndexedSessionSearch<TMetadata extends SessionMetadata = Sessio
 	extends SessionSearch<TMetadata>,
 		SearchIndexWriter<TItem> {}
 
-export interface SessionSearchReadable<TMetadata extends SessionMetadata = SessionMetadata> {
-	getMetadata(): Promise<TMetadata>;
-	findEntries(query?: EntryQuery): Promise<Entry[]>;
-}
+export type SessionSearchReadable<TMetadata extends SessionMetadata = SessionMetadata> = Pick<
+	SessionStorage<TMetadata>,
+	"getMetadata" | "findEntries"
+>;
 
 export interface SessionSearchSource<TMetadata extends SessionMetadata = SessionMetadata, TOptions = unknown> {
 	sessions(options?: TOptions): MaybeAsyncIterable<SessionSearchReadable<TMetadata>>;

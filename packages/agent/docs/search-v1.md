@@ -18,6 +18,25 @@ Search is a consumer of sessions. It is not part of `AgentHarness`, `Session`,
 state and reports committed facts. Applications decide whether and how to connect
 those facts to a search service.
 
+## Fit with harness v2
+
+This design relies on the harness v2 boundaries rather than extending them:
+
+- The searchable source of truth is the passive, append-only session tree. Search
+  indexes entries or projections of entries; lane operation records remain
+  orchestration/recovery state, not normal searchable conversation content.
+- Harness events are passive, live-only, and fire after commit. They may drive
+  near-real-time indexing, but durable indexing cannot depend on event replay;
+  catch-up/rebuild must read committed session state.
+- `SessionRepo.open()` is a writer/ownership operation for backends such as
+  SQLite. Generic scanning/feed must consume readable session views or backend
+  snapshots, not open sessions through the repository just to search.
+- Search indexes are derived state. Index writes and failures are outside harness
+  recovery and must not add operation-log states or storage invariants.
+- The serving/application layer owns freshness, leases, batching, remote index
+  auth, and stale-hit handling. The harness remains responsible only for durable
+  session execution.
+
 # 1. Goals
 
 - **Search outside the repo.** A repository locates and opens sessions. It does
@@ -82,10 +101,10 @@ A search source is anything that can expose **readable session views** to search
 code:
 
 ```ts
-interface SessionSearchReadable<TMetadata extends SessionMetadata = SessionMetadata> {
-  getMetadata(): Promise<TMetadata>;
-  findEntries(query?: EntryQuery): Promise<Entry[]>;
-}
+type SessionSearchReadable<TMetadata extends SessionMetadata = SessionMetadata> = Pick<
+  SessionStorage<TMetadata>,
+  "getMetadata" | "findEntries"
+>;
 
 interface SessionSearchSource<TMetadata extends SessionMetadata = SessionMetadata, TOptions = unknown> {
   sessions(options?: TOptions): Iterable<SessionSearchReadable<TMetadata>>
@@ -495,6 +514,26 @@ const scanSearch = createScanningSessionSearch(source);
 
 No `search()` method is added to the repo.
 
+For JSONL, the packaged source lives in the search module and is just the small
+loop over public JSONL listing/deserialization helpers:
+
+```ts
+for (const metadata of await listJsonlSessionMetadata({ fs, sessionsRoot }, { cwd })) {
+  yield loadJsonlSessionStorage({ fs, sessionsRoot }, metadata);
+}
+```
+
+Use it through the source wrapper when feeding/scanning:
+
+```ts
+const source = new JsonlSessionSearchSource({ fs, sessionsRoot });
+await feedSessionDocumentSnapshot(source, index, { listOptions: { cwd } });
+```
+
+It shares `fs` + `sessionsRoot` with `JsonlSessionRepo`, scans the same cwd
+layout, and uses the same JSONL storage loader. Search itself does not take a repo
+just to call `open()`.
+
 ## Custom search backend
 
 Implement only query if the backend owns its own data or scans remotely:
@@ -535,7 +574,7 @@ await feedSessionSnapshot(source, elastic, {
 For document-style indexes, use the convenience helper instead:
 
 ```ts
-await feedSessionDocumentSnapshot(repo, documentIndex);
+await feedSessionDocumentSnapshot(source, documentIndex);
 ```
 
 # 11. Package placement

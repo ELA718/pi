@@ -1,4 +1,9 @@
-export { JsonlSessionRepo } from "./jsonl/repo.ts";
+export {
+	JsonlSessionRepo,
+	jsonlSessionDirectoryName,
+	listJsonlSessionMetadata,
+	loadJsonlSessionStorage,
+} from "./jsonl/repo.ts";
 export type {
 	JsonlSessionCreateOptions,
 	JsonlSessionListOptions,

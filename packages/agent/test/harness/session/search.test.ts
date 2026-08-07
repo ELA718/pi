@@ -16,6 +16,7 @@ import {
 	type DocumentIndexedSessionSearch,
 	feedSessionDocumentSnapshot,
 	feedSessionSnapshot,
+	JsonlSessionSearchSource,
 	type SearchIndexWriter,
 	type SessionSearchDocumentFeedItem,
 	type SessionSearchHit,
@@ -161,19 +162,25 @@ describe("session search", () => {
 		expect(index.items).toEqual([{ sessionId: "session", entryId, seq: 1 }]);
 	});
 
-	it("feeds JSONL sessions into the same document-oriented index", async () => {
+	it("feeds JSONL sessions from disk through the JSONL search source", async () => {
 		const root = createTempDir();
-		const repository = new JsonlSessionRepo({ fs: new NodeExecutionEnv({ cwd: root }), sessionsRoot: root });
+		const options = { fs: new NodeExecutionEnv({ cwd: root }), sessionsRoot: root };
+		const repository = new JsonlSessionRepo(options);
+		const source = new JsonlSessionSearchSource(options);
 		const cwd = join(root, "workspace");
+		const otherCwd = join(root, "other");
 		const session = await repository.create({ id: "jsonl", cwd });
 		const entryId = await session.appendMessage(message("jsonl backed auth entry"));
+		const other = await repository.create({ id: "other", cwd: otherCwd });
+		await other.appendMessage(message("jsonl backed auth entry in another cwd"));
 		const index = new InMemoryIndexedSearch<Awaited<ReturnType<typeof session.getMetadata>>>();
 
-		await feedSessionDocumentSnapshot(createSessionListSearchSource([session]), index);
+		await feedSessionDocumentSnapshot(source, index, { listOptions: { cwd } });
 
 		await expect(index.search({ text: "auth", cwd })).resolves.toMatchObject([
 			{ metadata: { id: "jsonl", cwd }, entryId },
 		]);
+		await expect(index.search({ text: "auth", cwd: otherCwd })).resolves.toEqual([]);
 	});
 
 	it("keeps index failures outside canonical session writes", async () => {
