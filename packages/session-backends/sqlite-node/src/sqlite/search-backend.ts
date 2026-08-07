@@ -1,5 +1,11 @@
-import type { IndexedSessionSearch, SessionSearchHit, SessionSearchOptions } from "@earendil-works/pi-agent-core";
-import { getFileSystemResultOrThrow } from "@earendil-works/pi-agent-core";
+import type {
+	FileError,
+	IndexedSessionSearch,
+	Result,
+	SessionSearchHit,
+	SessionSearchOptions,
+} from "@earendil-works/pi-agent-core";
+import { SessionError } from "@earendil-works/pi-agent-core";
 import { applyMigrations } from "./migrations.ts";
 import { decodeSessionMetadata, type SessionRow } from "./storage/sessions.ts";
 import type {
@@ -8,6 +14,14 @@ import type {
 	SqliteSessionMetadata,
 	SqliteSessionRepositoryEnv,
 } from "./types.ts";
+
+function getFileSystemResultOrThrow<TValue>(result: Result<TValue, FileError>, message: string): TValue {
+	if (!result.ok) {
+		const code = result.error.code === "not_found" ? "not_found" : "storage";
+		throw new SessionError(code, `${message}: ${result.error.message}`, result.error);
+	}
+	return result.value;
+}
 
 function getParentPath(path: string): string {
 	const normalized = path.replace(/[\\/]+$/, "");

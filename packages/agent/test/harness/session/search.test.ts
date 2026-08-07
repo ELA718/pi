@@ -11,21 +11,34 @@ import {
 	type SessionStorage,
 } from "../../../src/harness/session/index.ts";
 import {
+	createJsonlScanningSessionSearch,
+	createMemoryScanningSessionSource,
 	createScanningSessionSearch,
-	createSessionListSearchSource,
-	type DocumentIndexedSessionSearch,
-	JsonlSessionSearchSource,
-	projectSessionSearchDocument,
+	type ScanningSessionSource,
 	type SearchIndexWriter,
-	type SessionSearchDocumentFeedItem,
 	type SessionSearchHit,
-	type SessionSearchSource,
 } from "../../../src/search/index.ts";
 import type { AgentMessage } from "../../../src/types.ts";
 
 interface WorkspaceMetadata extends SessionMetadata {
 	cwd: string;
 }
+
+interface SearchDocument<TMetadata extends SessionMetadata> {
+	sessionId: string;
+	entryId: string;
+	seq: number;
+	timestamp: number;
+	metadata: TMetadata;
+	text: string;
+	fields?: Record<string, unknown>;
+}
+
+type SearchDocumentFeedItem<TMetadata extends SessionMetadata> =
+	| { type: "entry_upsert"; document: SearchDocument<TMetadata> }
+	| { type: "entry_delete"; sessionId: string; entryId: string }
+	| { type: "session_delete"; sessionId: string }
+	| { type: "session_metadata"; sessionId: string; metadata: TMetadata };
 
 const tempDirs: string[] = [];
 
@@ -49,33 +62,45 @@ function createMemorySession(metadata: WorkspaceMetadata): Session<WorkspaceMeta
 	);
 }
 
-function createSource(sessions: Session<WorkspaceMetadata>[]): SessionSearchSource<WorkspaceMetadata> {
-	return createSessionListSearchSource(sessions);
+function createSource(sessions: Session<WorkspaceMetadata>[]): ScanningSessionSource<WorkspaceMetadata> {
+	return createMemoryScanningSessionSource(sessions);
 }
 
 async function feedDocumentSnapshot<TMetadata extends SessionMetadata, TListOptions>(
-	source: SessionSearchSource<TMetadata, TListOptions>,
-	index: SearchIndexWriter<SessionSearchDocumentFeedItem<TMetadata>>,
+	source: ScanningSessionSource<TMetadata, TListOptions>,
+	index: SearchIndexWriter<SearchDocumentFeedItem<TMetadata>>,
 	listOptions?: TListOptions,
 ): Promise<void> {
-	for await (const readable of source.sessions(listOptions)) {
-		const metadata = await readable.getMetadata();
+	for await (const session of source.sessions(listOptions)) {
+		const metadata = await session.metadata();
 		await index.apply([{ type: "session_metadata", sessionId: metadata.id, metadata }]);
-		for (const entry of await readable.findEntries({ order: "oldestFirst" })) {
-			await index.apply([{ type: "entry_upsert", document: projectSessionSearchDocument(metadata, entry) }]);
+		for await (const candidate of session.entries()) {
+			await index.apply([
+				{
+					type: "entry_upsert",
+					document: {
+						sessionId: metadata.id,
+						entryId: candidate.entryId,
+						seq: candidate.seq,
+						timestamp: candidate.timestamp,
+						metadata,
+						text: candidate.text,
+						fields: candidate.fields,
+					},
+				},
+			]);
 		}
 	}
 }
 
-class InMemoryIndexedSearch<TMetadata extends SessionMetadata> implements DocumentIndexedSessionSearch<TMetadata> {
-	readonly appliedBatches: SessionSearchDocumentFeedItem<TMetadata>[][] = [];
-	private readonly documents = new Map<
-		string,
-		Extract<SessionSearchDocumentFeedItem<TMetadata>, { type: "entry_upsert" }>["document"]
-	>();
+class InMemoryIndexedSearch<TMetadata extends SessionMetadata>
+	implements SearchIndexWriter<SearchDocumentFeedItem<TMetadata>>
+{
+	readonly appliedBatches: SearchDocumentFeedItem<TMetadata>[][] = [];
+	private readonly documents = new Map<string, SearchDocument<TMetadata>>();
 	private readonly metadata = new Map<string, TMetadata>();
 
-	async apply(items: SessionSearchDocumentFeedItem<TMetadata>[]): Promise<void> {
+	async apply(items: SearchDocumentFeedItem<TMetadata>[]): Promise<void> {
 		this.appliedBatches.push(items);
 		for (const item of items) {
 			switch (item.type) {
@@ -135,7 +160,7 @@ class EntryReferenceIndex implements SearchIndexWriter<EntryReferenceFeedItem> {
 }
 
 describe("session search", () => {
-	it("scans an arbitrary in-memory session source", async () => {
+	it("scans an arbitrary in-memory projected source", async () => {
 		const root = createMemorySession({ id: "root", createdAt: 1, cwd: "/repo" });
 		await root.appendMessage(message("fix auth flow"));
 		const other = createMemorySession({ id: "other", createdAt: 2, cwd: "/other" });
@@ -149,7 +174,18 @@ describe("session search", () => {
 		await expect(search.search({ text: "missing" })).resolves.toEqual([]);
 	});
 
-	it("feeds memory sessions into an arbitrary index without a repository search method", async () => {
+	it("includes labels in memory scanning projections", async () => {
+		const session = createMemorySession({ id: "session", createdAt: 1, cwd: "/repo" });
+		const entryId = await session.appendMessage(message("plain body"));
+		await session.setLabel(entryId, "important label");
+		const search = createScanningSessionSearch(createSource([session]));
+
+		await expect(search.search({ text: "important" })).resolves.toMatchObject([
+			{ metadata: { id: "session", cwd: "/repo" }, entryId },
+		]);
+	});
+
+	it("feeds memory projections into an arbitrary index without a repository search method", async () => {
 		const session = createMemorySession({ id: "session", createdAt: 1, cwd: "/repo" });
 		const first = await session.appendMessage(message("implement auth search"));
 		await session.appendMessage(message("unrelated"));
@@ -163,40 +199,43 @@ describe("session search", () => {
 		expect(index.appliedBatches.length).toBeGreaterThan(1);
 	});
 
-	it("feeds snapshots through arbitrary backend-owned item shapes", async () => {
+	it("feeds projected snapshots through arbitrary backend-owned item shapes", async () => {
 		const session = createMemorySession({ id: "session", createdAt: 1, cwd: "/repo" });
 		const entryId = await session.appendMessage(message("index by reference"));
 		const index = new EntryReferenceIndex();
 
-		for await (const readable of createSource([session]).sessions()) {
-			const metadata = await readable.getMetadata();
-			for (const entry of await readable.findEntries({ order: "oldestFirst" })) {
-				await index.apply([{ sessionId: metadata.id, entryId: entry.id, seq: entry.seq }]);
+		for await (const scanningSession of createSource([session]).sessions()) {
+			const metadata = await scanningSession.metadata();
+			for await (const candidate of scanningSession.entries()) {
+				await index.apply([{ sessionId: metadata.id, entryId: candidate.entryId, seq: candidate.seq }]);
 			}
 		}
 
 		expect(index.items).toEqual([{ sessionId: "session", entryId, seq: 1 }]);
 	});
 
-	it("feeds JSONL sessions from disk through the JSONL search source", async () => {
+	it("scans JSONL sessions from disk through the JSONL scanning source", async () => {
 		const root = createTempDir();
 		const options = { fs: new NodeExecutionEnv({ cwd: root }), sessionsRoot: root };
 		const repository = new JsonlSessionRepo(options);
-		const source = new JsonlSessionSearchSource(options);
 		const cwd = join(root, "workspace");
 		const otherCwd = join(root, "other");
 		const session = await repository.create({ id: "jsonl", cwd });
 		const entryId = await session.appendMessage(message("jsonl backed auth entry"));
+		await session.setLabel(entryId, "disk label");
 		const other = await repository.create({ id: "other", cwd: otherCwd });
-		await other.appendMessage(message("jsonl backed auth entry in another cwd"));
-		const index = new InMemoryIndexedSearch<Awaited<ReturnType<typeof session.getMetadata>>>();
+		const otherEntryId = await other.appendMessage(message("jsonl backed auth entry in another cwd"));
+		const search = createJsonlScanningSessionSearch(options);
 
-		await feedDocumentSnapshot(source, index, { cwd });
-
-		await expect(index.search({ text: "auth", cwd })).resolves.toMatchObject([
+		await expect(search.search({ text: "auth", cwd })).resolves.toMatchObject([
 			{ metadata: { id: "jsonl", cwd }, entryId },
 		]);
-		await expect(index.search({ text: "auth", cwd: otherCwd })).resolves.toEqual([]);
+		await expect(search.search({ text: "disk", cwd })).resolves.toMatchObject([
+			{ metadata: { id: "jsonl", cwd }, entryId },
+		]);
+		await expect(search.search({ text: "auth", cwd: otherCwd })).resolves.toMatchObject([
+			{ metadata: { id: "other", cwd: otherCwd }, entryId: otherEntryId },
+		]);
 	});
 
 	it("keeps index failures outside canonical session writes", async () => {
@@ -204,7 +243,7 @@ describe("session search", () => {
 		await session.appendMessage(message("before index failure"));
 		const source = createSource([session]);
 		const failingIndex = {
-			async apply(_items: SessionSearchDocumentFeedItem<WorkspaceMetadata>[]) {
+			async apply(_items: SearchDocumentFeedItem<WorkspaceMetadata>[]) {
 				throw new Error("index down");
 			},
 		};

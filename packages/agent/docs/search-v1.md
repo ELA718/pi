@@ -46,10 +46,10 @@ This design relies on the harness v2 boundaries rather than extending them:
   It does not know which search backend exists, whether indexing is synchronous,
   or whether indexing exists at all.
 - **Two built-in search styles.**
-  1. A scanning implementation over a supplied list/source of sessions. This
-     works for JSONL, memory, tests, and custom collections.
-  2. A SQLite FTS implementation. It may use FTS5 directly over canonical SQLite
-     `entries`. It is still a search service, not a repository capability.
+  1. Scanning search: non-indexed search over a search-shaped source. Built-in
+     sources/adapters cover JSONL and memory.
+  2. SQLite FTS search: an indexed/materialized backend over canonical SQLite
+     tables. It is still a search service, not a repository capability.
 - **Query is the common abstraction.** All search backends implement
   `SessionSearch`. The query caller does not know whether the backend scans,
   queries SQLite FTS, calls Elasticsearch, or delegates to an app-owned service.
@@ -95,29 +95,48 @@ entries, lane records, lanes, facts, and stats. Search only indexes or scans a
 projection of that data. The session remains complete and valid if all search
 state is removed.
 
-## Search source
+## Scanning source
 
-A search source is anything that can expose **readable session views** to search
-code:
+A scanning source exposes a **search projection**, not `SessionStorage`. Storage
+methods such as `findEntries()`, `getName()`, or `getLabel()` may be convenient
+inside a backend adapter, but they are not the shared search contract and are not
+assumed to be optimal for search.
 
 ```ts
-type SessionSearchReadable<TMetadata extends SessionMetadata = SessionMetadata> = Pick<
-  SessionStorage<TMetadata>,
-  "getMetadata" | "findEntries" | "getName" | "getLabel"
->;
+interface SessionSearchCandidate {
+  entryId: string;
+  seq: number;
+  timestamp: number;
+  text: string;
+  fields?: Record<string, unknown>;
+}
 
-interface SessionSearchSource<TMetadata extends SessionMetadata = SessionMetadata, TOptions = unknown> {
-  sessions(options?: TOptions): Iterable<SessionSearchReadable<TMetadata>>
-    | AsyncIterable<SessionSearchReadable<TMetadata>>;
+interface ScanningSession<TMetadata extends SessionMetadata = SessionMetadata> {
+  metadata(): Promise<TMetadata>;
+  entries(options?: { afterSeq?: number; limit?: number }):
+    Iterable<SessionSearchCandidate> | AsyncIterable<SessionSearchCandidate>;
+}
+
+interface ScanningSessionSource<TMetadata extends SessionMetadata = SessionMetadata, TOptions = unknown> {
+  sessions(options?: TOptions): Iterable<ScanningSession<TMetadata>>
+    | AsyncIterable<ScanningSession<TMetadata>>;
+}
+
+interface ScanningSessionSearchOptions<TMetadata, TOptions> {
+  sourceOptions?: (query: SessionSearchOptions) => TOptions | undefined;
+  match?: (queryText: string, candidate: SessionSearchCandidate, metadata: TMetadata) => boolean;
+  score?: (queryText: string, candidate: SessionSearchCandidate, metadata: TMetadata) => number | undefined;
 }
 ```
 
-The source is deliberately an iterator of readable sessions, not `list()` +
-`repo.open()`. For backends such as SQLite, `repo.open()` claims the session's
-writer lease; scanning search is read-only and must not accidentally compete with
-the harness/app that already owns that writer. The application/backend decides how
-to produce readable views safely: already-open sessions, read-only snapshots, a
-remote API, or a backend-specific read iterator.
+The source is deliberately an iterator of projected searchable sessions, not
+`list()` + `repo.open()`. For backends such as SQLite, `repo.open()` claims the
+session's writer lease; scanning search is read-only and must not accidentally
+compete with the harness/app that already owns that writer. The
+application/backend decides how to produce projected views safely: JSONL can adapt
+its storage loader, memory can wrap live sessions, a remote backend can stream
+search candidates from an API, and a custom backend can use whatever read path is
+optimal.
 
 ## Search backend
 
@@ -133,8 +152,8 @@ This is the only universal search contract.
 
 ## Search index writer
 
-An indexed backend may additionally expose a writer. The writer is generic over
-its feed item type:
+An indexed backend may additionally expose a writer. The common writer contract
+only says "apply some backend-owned items" and optionally "flush pending work":
 
 ```ts
 interface SearchIndexWriter<TItem = unknown> {
@@ -146,19 +165,22 @@ interface IndexedSessionSearch<TMetadata extends SessionMetadata = SessionMetada
   extends SessionSearch<TMetadata>, SearchIndexWriter<TItem> {}
 ```
 
-The important point is `TItem`: pi does not prescribe the indexed shape.
+The important point is `TItem`: pi does not declare universal feed commands or a
+universal document/update shape. Each indexed backend owns its own item type.
 
 Examples:
 
 ```ts
-// A document-oriented remote index.
-type ElasticFeedItem = { type: "upsert"; id: string; body: Record<string, unknown> };
+type ElasticFeedItem =
+  | { type: "upsert"; id: string; body: Record<string, unknown> }
+  | { type: "delete"; id: string };
 
-// A SQLite FTS adapter over canonical SQLite entries.
-type SqliteFtsFeedItem = { type: "index_entry"; sessionId: string; entryId: string };
-
-// A backend that rebuilds by reading its own canonical tables may not need a
-// public item type at all; it can expose rebuild/catch-up methods of its own.
+type SqliteSessionSearchFeedItem =
+  | { type: "rebuild" }
+  | { type: "index_session"; sessionId: string }
+  | { type: "index_entry"; sessionId: string; entryId: string }
+  | { type: "delete_session"; sessionId: string }
+  | { type: "delete_entry"; sessionId: string; entryId: string };
 ```
 
 # 3. Query surface
@@ -193,39 +215,41 @@ interface stays small.
 
 ## 4.1 Scanning search
 
-Scanning search receives a `SessionSearchSource`, iterates readable sessions,
-reads entries, and filters in memory.
+Scanning search receives a `ScanningSessionSource`, iterates projected candidates,
+and applies common matching/limit behavior in memory. The scanner does not know
+about `SessionStorage` or repository APIs.
 
 ```ts
-const source = createSessionListSearchSource([alreadyOpenSession]);
 const search = createScanningSessionSearch(source);
 ```
 
-A backend can also provide its own read-only iterator:
+Built-in source adapters can be layered on top:
 
 ```ts
-const source = {
-  async *sessions({ cwd }) {
-    yield* sqliteReadOnlySessionSnapshots({ cwd });
-  },
-};
+const jsonlSearch = createJsonlScanningSessionSearch({ fs, sessionsRoot });
+const memorySearch = createMemoryScanningSessionSearch([session]);
 ```
 
 Properties:
 
 - No persistent index.
-- No feed and no index writes.
+- No `apply()` and no index writes.
 - Always reflects whatever the source returns at query time.
-- Works for memory, JSONL, SQLite, tests, and custom sources.
+- Matching behavior is shared; backend-specific code owns reading/projection.
+- JSONL and memory can use storage methods internally, but that coupling stays in
+  their adapters rather than in the shared search type.
 - Slow for large collections; acceptable as a default/fallback.
 
-Scanning search proves search can be expressed over readable session views without
-extending the repository contract or acquiring writer leases.
+Scanning search proves search can be expressed over projected readable views
+without extending the repository contract or acquiring writer leases.
 
 ## 4.2 SQLite FTS search
 
-SQLite FTS search is a backend-specific indexed search implementation. It can use
-FTS5 directly over canonical SQLite `entries`:
+SQLite FTS search is the built-in indexed/materialized implementation. It does
+not participate in the scanning-source abstraction. It implements
+`IndexedSessionSearch<SqliteSessionMetadata, SqliteSessionSearchFeedItem>` and
+queries a materialized FTS table. It can use FTS5 directly over canonical SQLite
+`entries`:
 
 ```sql
 CREATE VIRTUAL TABLE session_search_fts USING fts5(
@@ -252,8 +276,10 @@ The boundary is still architectural, not necessarily physical:
 
 - The repository does not expose `search()`.
 - The harness does not prescribe indexing.
-- The SQLite search adapter owns any FTS schema, rebuild, trigger, or catch-up
-  policy.
+- The SQLite search adapter owns the FTS schema and its backend-specific feed
+  commands.
+- Canonical SQLite writes update `sessions`/`entries`; FTS is derived state and is
+  updated by explicit `apply(...)` calls such as `index_entry` or `rebuild`.
 
 ## 4.3 Index maintenance policy
 
@@ -290,86 +316,74 @@ remain independent from the index.
 Triggers remain allowed as a backend-specific optimization for a co-located search
 adapter. They are not the common abstraction.
 
-# 5. Optional document utilities
+# 5. Projection
 
-Document-oriented indexes are common, especially remote ones. For those, pi
-provides optional document helpers:
+Projection belongs to the source or indexed backend adapter. A scanning source
+projects canonical state into `SessionSearchCandidate` values with text ready for
+matching. An indexed backend adapter projects committed state into its own
+`TItem` feed commands.
 
-```ts
-interface SessionSearchDocument<TMetadata extends SessionMetadata = SessionMetadata> {
-  sessionId: string;
-  entryId: string;
-  seq: number;
-  timestamp: number;
-  metadata: TMetadata;
-  text: string;
-  fields?: Record<string, string | number | boolean | null>;
-}
-
-type SessionSearchDocumentFeedItem<TMetadata extends SessionMetadata = SessionMetadata> =
-  | { type: "entry_upsert"; document: SessionSearchDocument<TMetadata> }
-  | { type: "entry_delete"; sessionId: string; entryId: string }
-  | { type: "session_delete"; sessionId: string }
-  | { type: "session_metadata"; sessionId: string; metadata: TMetadata };
-```
-
-These are not required for SQLite FTS or user-defined backends. They are a
-convenience for adapters that want to materialize searchable documents.
-
-Default projection:
+For JSONL scanning, the adapter may use `JsonlSessionStorage` internally:
 
 ```ts
-function defaultSearchText(entry: Entry): string {
-  return JSON.stringify(entry);
-}
+export async function* jsonlScanningSessions(options, query = {}) {
+  for await (const storage of jsonlSearchSessions(options, query)) {
+    yield {
+      metadata: () => storage.getMetadata(),
+      async *entries({ limit = 100, afterSeq = 0 } = {}) {
+        while (true) {
+          const entries = await storage.findEntries({
+            order: "oldestFirst",
+            limit,
+            cursor: { afterSeq },
+          });
+          if (entries.length === 0) break;
 
-function projectSessionSearchDocument(metadata, entry): SessionSearchDocument {
-  return {
-    sessionId: metadata.id,
-    entryId: entry.id,
-    seq: entry.seq,
-    timestamp: entry.timestamp,
-    metadata,
-    text: defaultSearchText(entry),
-  };
-}
-```
+          for (const entry of entries) {
+            const label = await storage.getLabel(entry.id);
+            yield {
+              entryId: entry.id,
+              seq: entry.seq,
+              timestamp: entry.timestamp,
+              text: JSON.stringify(entry) + (label ? ` ${label}` : ""),
+              fields: label === undefined ? undefined : { label },
+            };
+          }
 
-Applications commonly override projection:
-
-- message entries: role plus visible text content;
-- assistant entries: visible text and maybe tool-call names;
-- tool results: result text, maybe omit huge blobs;
-- compaction and branch summaries: summary text;
-- custom entries: app-owned serialization.
-
-# 6. Feeding indexes
-
-Feeding is application-owned. A snapshot/catch-up job iterates readable sessions
-and emits the backend's own item type:
-
-```ts
-for await (const session of source.sessions({ cwd })) {
-  const metadata = await session.getMetadata();
-  await index.apply([{ type: "session", metadata }]);
-
-  for (const entry of await session.findEntries({ order: "oldestFirst" })) {
-    await index.apply([{
-      type: "index_entry_ref",
-      sessionId: metadata.id,
-      entryId: entry.id,
-      seq: entry.seq,
-    }]);
+          afterSeq = entries[entries.length - 1].seq;
+        }
+      },
+    };
   }
 }
 ```
 
-The same readable session can expose facts for apps that want to index them:
+That reuse is JSONL-specific. The shared search API does not require every
+backend to expose `findEntries()`, labels, names, or any storage-shaped methods.
+
+# 6. Feeding indexes
+
+Feeding is application-owned and backend-specific. The common API only provides
+`SearchIndexWriter<TItem>.apply(items)`. The item type is declared by the backend
+or by the application adapter.
+
+SQLite declares its own feed items, for example:
 
 ```ts
-const name = await session.getName();
-const label = await session.getLabel(entry.id);
+await sqliteSearch.apply([{ type: "index_entry", sessionId, entryId }]);
+await sqliteSearch.apply([{ type: "rebuild" }]);
 ```
+
+A remote index would declare different items:
+
+```ts
+type ElasticItem = { type: "upsert"; id: string; body: unknown };
+await elastic.apply([{ type: "upsert", id, body }]);
+```
+
+Snapshot/catch-up loops are ordinary application/adapter code. They may read
+JSONL via the JSONL scanning source, read SQLite canonical tables directly, or use
+a backend-specific API.
 
 Live indexing is also application-owned:
 
@@ -406,7 +420,9 @@ transaction. If not, writing the checkpoint after index acknowledgement preserve
 at-least-once safety.
 
 The common `SessionSearch` result does not promise that an indexed backend is
-fully current with canonical sessions. Applications that need freshness can:
+fully current with canonical sessions. For SQLite FTS, results reflect the most
+recent successful `apply(...)`/`rebuild`, not merely the most recent canonical
+write. Applications that need freshness can:
 
 - perform catch-up before query,
 - display an "indexing" state,
@@ -467,10 +483,11 @@ they are:
 - ignore labels and names for search.
 
 The harness should not prescribe this because UI search semantics differ by app.
-Readable storages already expose `getName()` and `getLabel(id)`; JSONL search
-sessions loaded through `jsonlSearchSessions()` expose the same methods without
-calling `repo.open()`. If an application wants name/label search, it should use
-those public storage reads and emit its own backend-owned search feed items.
+A scanning source may include names/labels in its projected candidate text or
+fields. JSONL can do this inside its adapter by calling the public JSONL storage
+reads after loading sessions read-only. Indexed backends should represent
+name/label updates with their own feed item shapes if they want those facts to be
+searchable.
 
 # 9. Error isolation
 
@@ -493,8 +510,8 @@ This separation prevents search from becoming storage handling.
 
 Implement `SessionRepo` for canonical lifecycle. Do not make scanning search call
 `repo.open()` for every result: in writer-lease backends, `open()` may mean
-"claim the writer". Instead, expose a separate readable source when you want
-scanning or generic feed:
+"claim the writer". Instead, expose a separate projected scanning source when you
+want non-indexed search:
 
 ```ts
 class PostgresSessionRepo implements SessionRepo<PostgresMetadata, CreateOptions, ListOptions> {
@@ -509,8 +526,18 @@ const source = {
   async *sessions(options?: ListOptions) {
     for (const row of await postgres.listReadableSessions(options)) {
       yield {
-        getMetadata: async () => row.metadata,
-        findEntries: async (query) => postgres.readEntries(row.id, query),
+        metadata: async () => row.metadata,
+        async *entries({ afterSeq = 0, limit = 100 } = {}) {
+          for (const entry of await postgres.readSearchEntries(row.id, { afterSeq, limit })) {
+            yield {
+              entryId: entry.id,
+              seq: entry.seq,
+              timestamp: entry.timestamp,
+              text: entry.searchText,
+              fields: entry.fields,
+            };
+          }
+        },
       };
     }
   },
@@ -530,20 +557,10 @@ for (const metadata of await listJsonlSessionMetadata({ fs, sessionsRoot }, { cw
 }
 ```
 
-Use it through the source wrapper when feeding/scanning:
-
-```ts
-const source = new JsonlSessionSearchSource({ fs, sessionsRoot });
-for await (const session of source.sessions({ cwd })) {
-  const metadata = await session.getMetadata();
-  const entries = await session.findEntries({ order: "oldestFirst" });
-  // index/apply backend-owned feed items here
-}
-```
-
-It shares `fs` + `sessionsRoot` with `JsonlSessionRepo`, scans the same cwd
-layout, and uses the same JSONL storage loader. Search itself does not take a repo
-just to call `open()`.
+The JSONL scanning adapter may reuse those helpers internally, then project
+`JsonlSessionStorage` into scanning candidates. This preserves the useful JSONL
+behavior — enumerate/load readable session files without `repo.open()` — while
+keeping the shared scanning interface decoupled from `SessionStorage`.
 
 ## Custom search backend
 
@@ -570,37 +587,42 @@ class ElasticSessionSearch implements IndexedSessionSearch<MyMetadata, ElasticIt
 }
 ```
 
-Wire canonical sessions to that backend at app level:
-
-```ts
-for await (const session of source.sessions()) {
-  const metadata = await session.getMetadata();
-  for (const entry of await session.findEntries({ order: "oldestFirst" })) {
-    await elastic.apply([{
-      type: "upsert",
-      id: `${metadata.id}:${entry.id}`,
-      body: { sessionId: metadata.id, entryId: entry.id, text: JSON.stringify(entry) },
-    }]);
-  }
-}
-```
+Wire canonical sessions to that backend at app level with whatever projection
+that backend wants. The projection does not need to use the scanning-source
+interface; it can read canonical state through any safe backend-specific path.
 
 # 11. Package placement
 
-The shared agent package exports the small query/source/index types, scanning
-search, and optional document helpers:
+`src/search/index.ts` stays the high-level public surface and re-exports the
+built-ins. Implementation-specific pieces live in sibling modules:
+
+- `src/search/scanning.ts` — generic scanner and projected source types.
+- `src/search/jsonl.ts` — JSONL read-only scanning adapter.
+- `src/search/memory.ts` — memory/already-owned-session scanning adapter.
+- `src/search/indexable.ts` — indexed-search writer contracts.
+
+The shared agent package exports the small query/index types plus the generic
+scanner over projected search sources:
 
 ```ts
 export type { SessionSearch, SessionSearchHit, SessionSearchOptions };
-export type { SessionSearchReadable, SessionSearchSource };
 export type { SearchIndexWriter, IndexedSessionSearch };
-export type { SessionSearchDocument, SessionSearchDocumentFeedItem };
-export {
-  createSessionListSearchSource,
-  createScanningSessionSearch,
-  JsonlSessionSearchSource,
-  jsonlSearchSessions,
-};
+export type { SessionSearchCandidate, ScanningSession, ScanningSessionSource };
+export type { ScanningSessionSearchOptions };
+export { createScanningSessionSearch };
+```
+
+JSONL-specific scanning helpers live with the search JSONL adapter and may reuse
+public JSONL listing/loading helpers:
+
+```ts
+export { createJsonlScanningSessionSource, createJsonlScanningSessionSearch, jsonlScanningSessions };
+```
+
+Memory can provide a small adapter for already-owned sessions/storages:
+
+```ts
+export { createMemoryScanningSessionSource, createMemoryScanningSessionSearch, memoryScanningSessions };
 ```
 
 The SQLite package exports its FTS implementation:
@@ -609,25 +631,25 @@ The SQLite package exports its FTS implementation:
 export { createSqliteSessionSearch };
 ```
 
-Neither package requires `SessionRepo` to grow a search method. Search utilities
-consume readable session sources; a repo may provide such a source separately,
-but `repo.open()` is not assumed to be a read-only operation.
+Neither package requires `SessionRepo` to grow a search method. Scanning search
+consumes projected search sources; indexed search consumes backend-owned feed
+items. `repo.open()` is not assumed to be a read-only operation.
 
 # 12. Summary
 
 Search has three independent pieces:
 
-1. **Source** — where readable sessions/entries come from. This can be already
-   open sessions, read-only snapshots, a server catalog, or live harness events
-   owned by the application. It is not `repo.open()` unless that operation is
-   known to be read-only for the backend.
-2. **Feed/projection** — optional connection from canonical state to an indexed
-   backend. The feed item shape belongs to the backend.
-3. **Query backend** — either scans the source directly or queries a derived
-   index such as SQLite FTS, Elasticsearch, Postgres full-text search, or a hosted
-   app service.
+1. **Scanning source** — a projected read path for non-indexed search. JSONL and
+   memory can provide built-in adapters; custom backends can provide their own. It
+   is not `repo.open()` unless that operation is known to be read-only for the
+   backend.
+2. **Indexed feed** — optional connection from canonical state to an indexed
+   backend. The feed item shape belongs to the backend; core only provides
+   `apply()`/`flush()`.
+3. **Query backend** — either scans projected candidates directly or queries a
+   derived index such as SQLite FTS, Elasticsearch, Postgres full-text search, or
+   a hosted app service.
 
-Documents are one optional feed shape, not the search abstraction. The boundary is
-explicit: canonical sessions produce entries; applications/adapters connect those
-entries to whatever search backend they want; query callers only see
-`SessionSearch`.
+The boundary is explicit: canonical sessions produce durable state;
+applications/adapters project that state for scanning or feed backend-owned items
+to indexes; query callers only see `SessionSearch`.
