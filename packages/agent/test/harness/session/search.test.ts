@@ -14,9 +14,8 @@ import {
 	createScanningSessionSearch,
 	createSessionListSearchSource,
 	type DocumentIndexedSessionSearch,
-	feedSessionDocumentSnapshot,
-	feedSessionSnapshot,
 	JsonlSessionSearchSource,
+	projectSessionSearchDocument,
 	type SearchIndexWriter,
 	type SessionSearchDocumentFeedItem,
 	type SessionSearchHit,
@@ -52,6 +51,20 @@ function createMemorySession(metadata: WorkspaceMetadata): Session<WorkspaceMeta
 
 function createSource(sessions: Session<WorkspaceMetadata>[]): SessionSearchSource<WorkspaceMetadata> {
 	return createSessionListSearchSource(sessions);
+}
+
+async function feedDocumentSnapshot<TMetadata extends SessionMetadata, TListOptions>(
+	source: SessionSearchSource<TMetadata, TListOptions>,
+	index: SearchIndexWriter<SessionSearchDocumentFeedItem<TMetadata>>,
+	listOptions?: TListOptions,
+): Promise<void> {
+	for await (const readable of source.sessions(listOptions)) {
+		const metadata = await readable.getMetadata();
+		await index.apply([{ type: "session_metadata", sessionId: metadata.id, metadata }]);
+		for (const entry of await readable.findEntries({ order: "oldestFirst" })) {
+			await index.apply([{ type: "entry_upsert", document: projectSessionSearchDocument(metadata, entry) }]);
+		}
+	}
 }
 
 class InMemoryIndexedSearch<TMetadata extends SessionMetadata> implements DocumentIndexedSessionSearch<TMetadata> {
@@ -142,7 +155,7 @@ describe("session search", () => {
 		await session.appendMessage(message("unrelated"));
 		const index = new InMemoryIndexedSearch<WorkspaceMetadata>();
 
-		await feedSessionDocumentSnapshot(createSource([session]), index, { batchSize: 2 });
+		await feedDocumentSnapshot(createSource([session]), index);
 
 		await expect(index.search({ text: "auth", cwd: "/repo" })).resolves.toMatchObject([
 			{ metadata: { id: "session", cwd: "/repo" }, entryId: first },
@@ -155,9 +168,12 @@ describe("session search", () => {
 		const entryId = await session.appendMessage(message("index by reference"));
 		const index = new EntryReferenceIndex();
 
-		await feedSessionSnapshot(createSource([session]), index, {
-			projectEntry: (metadata, entry) => ({ sessionId: metadata.id, entryId: entry.id, seq: entry.seq }),
-		});
+		for await (const readable of createSource([session]).sessions()) {
+			const metadata = await readable.getMetadata();
+			for (const entry of await readable.findEntries({ order: "oldestFirst" })) {
+				await index.apply([{ sessionId: metadata.id, entryId: entry.id, seq: entry.seq }]);
+			}
+		}
 
 		expect(index.items).toEqual([{ sessionId: "session", entryId, seq: 1 }]);
 	});
@@ -175,7 +191,7 @@ describe("session search", () => {
 		await other.appendMessage(message("jsonl backed auth entry in another cwd"));
 		const index = new InMemoryIndexedSearch<Awaited<ReturnType<typeof session.getMetadata>>>();
 
-		await feedSessionDocumentSnapshot(source, index, { listOptions: { cwd } });
+		await feedDocumentSnapshot(source, index, { cwd });
 
 		await expect(index.search({ text: "auth", cwd })).resolves.toMatchObject([
 			{ metadata: { id: "jsonl", cwd }, entryId },
@@ -193,7 +209,7 @@ describe("session search", () => {
 			},
 		};
 
-		await expect(feedSessionDocumentSnapshot(source, failingIndex)).rejects.toThrow("index down");
+		await expect(feedDocumentSnapshot(source, failingIndex)).rejects.toThrow("index down");
 		await session.appendMessage(message("after index failure"));
 
 		await expect(session.findEntries({ type: "message" })).resolves.toHaveLength(2);

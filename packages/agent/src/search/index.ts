@@ -5,9 +5,7 @@ export { JsonlSessionSearchSource, jsonlSearchSessions } from "./jsonl.ts";
 import { SessionError } from "../harness/session/types.ts";
 import type { FileError, Result } from "../harness/types.ts";
 
-type MaybePromise<T> = T | Promise<T>;
 type MaybeAsyncIterable<T> = Iterable<T> | AsyncIterable<T>;
-type FeedProjectionResult<TItem> = TItem | readonly TItem[] | undefined;
 
 export interface SessionSearchOptions {
 	text: string;
@@ -38,7 +36,7 @@ export interface IndexedSessionSearch<TMetadata extends SessionMetadata = Sessio
 
 export type SessionSearchReadable<TMetadata extends SessionMetadata = SessionMetadata> = Pick<
 	SessionStorage<TMetadata>,
-	"getMetadata" | "findEntries"
+	"getMetadata" | "findEntries" | "getName" | "getLabel"
 >;
 
 export interface SessionSearchSource<TMetadata extends SessionMetadata = SessionMetadata, TOptions = unknown> {
@@ -53,13 +51,6 @@ export function createSessionListSearchSource<TMetadata extends SessionMetadata>
 			return sessions;
 		},
 	};
-}
-
-export interface FeedSessionSnapshotOptions<TMetadata extends SessionMetadata, TListOptions, TItem> {
-	listOptions?: TListOptions;
-	projectSession?: (metadata: TMetadata) => MaybePromise<FeedProjectionResult<TItem>>;
-	projectEntry: (metadata: TMetadata, entry: Entry) => MaybePromise<FeedProjectionResult<TItem>>;
-	batchSize?: number;
 }
 
 export interface SessionSearchDocument<TMetadata extends SessionMetadata = SessionMetadata> {
@@ -92,15 +83,6 @@ export type SessionSearchDocumentProjector<TMetadata extends SessionMetadata = S
 	entry: Entry,
 ) => SessionSearchDocument<TMetadata> | undefined;
 
-export interface FeedSessionDocumentSnapshotOptions<
-	TMetadata extends SessionMetadata = SessionMetadata,
-	TListOptions = unknown,
-> {
-	listOptions?: TListOptions;
-	project?: SessionSearchDocumentProjector<TMetadata>;
-	batchSize?: number;
-}
-
 export function getFileSystemResultOrThrow<TValue>(result: Result<TValue, FileError>, message: string): TValue {
 	if (!result.ok) {
 		const code = result.error.code === "not_found" ? "not_found" : "storage";
@@ -126,65 +108,6 @@ export function projectSessionSearchDocument<TMetadata extends SessionMetadata>(
 		metadata,
 		text: textProjector(entry),
 	};
-}
-
-export async function feedSessionSnapshot<TMetadata extends SessionMetadata, TListOptions, TItem>(
-	source: SessionSearchSource<TMetadata, TListOptions>,
-	index: SearchIndexWriter<TItem>,
-	options: FeedSessionSnapshotOptions<TMetadata, TListOptions, TItem>,
-): Promise<void> {
-	const batchSize = options.batchSize ?? 100;
-	if (!Number.isInteger(batchSize) || batchSize <= 0) {
-		throw new SessionError("invalid_query", `Search feed batchSize must be a positive integer, got ${batchSize}`);
-	}
-	let batch: TItem[] = [];
-	const flushBatch = async () => {
-		if (batch.length === 0) return;
-		const items = batch;
-		batch = [];
-		await index.apply(items);
-	};
-	const enqueue = async (projected: MaybePromise<FeedProjectionResult<TItem>>) => {
-		const result = await projected;
-		if (result === undefined) return;
-		const items = Array.isArray(result) ? result : [result];
-		for (const item of items) {
-			batch.push(item);
-			if (batch.length >= batchSize) await flushBatch();
-		}
-	};
-
-	for await (const session of source.sessions(options.listOptions)) {
-		const metadata = await session.getMetadata();
-		if (options.projectSession) await enqueue(options.projectSession(metadata));
-		for (const entry of await session.findEntries({ order: "oldestFirst" })) {
-			await enqueue(options.projectEntry(metadata, entry));
-		}
-	}
-	await flushBatch();
-	await index.flush?.();
-}
-
-export async function feedSessionDocumentSnapshot<TMetadata extends SessionMetadata, TListOptions = unknown>(
-	source: SessionSearchSource<TMetadata, TListOptions>,
-	index: SessionSearchDocumentIndexWriter<TMetadata>,
-	options: FeedSessionDocumentSnapshotOptions<TMetadata, TListOptions> = {},
-): Promise<void> {
-	const project: SessionSearchDocumentProjector<TMetadata> =
-		options.project ?? ((metadata, entry) => projectSessionSearchDocument(metadata, entry));
-	await feedSessionSnapshot(source, index, {
-		listOptions: options.listOptions,
-		batchSize: options.batchSize,
-		projectSession: (metadata): SessionSearchDocumentFeedItem<TMetadata> => ({
-			type: "session_metadata",
-			sessionId: metadata.id,
-			metadata,
-		}),
-		projectEntry: (metadata, entry): SessionSearchDocumentFeedItem<TMetadata> | undefined => {
-			const document = project(metadata, entry);
-			return document === undefined ? undefined : { type: "entry_upsert", document };
-		},
-	});
 }
 
 class ScanningSessionSearch<TMetadata extends SessionMetadata = SessionMetadata, TListOptions = unknown>

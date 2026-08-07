@@ -103,7 +103,7 @@ code:
 ```ts
 type SessionSearchReadable<TMetadata extends SessionMetadata = SessionMetadata> = Pick<
   SessionStorage<TMetadata>,
-  "getMetadata" | "findEntries"
+  "getMetadata" | "findEntries" | "getName" | "getLabel"
 >;
 
 interface SessionSearchSource<TMetadata extends SessionMetadata = SessionMetadata, TOptions = unknown> {
@@ -345,28 +345,31 @@ Applications commonly override projection:
 
 # 6. Feeding indexes
 
-There is one generic snapshot feeder. It reads sessions and lets the caller
-project each session/entry into the backend's own item type:
+Feeding is application-owned. A snapshot/catch-up job iterates readable sessions
+and emits the backend's own item type:
 
 ```ts
-await feedSessionSnapshot(source, index, {
-  projectSession: (metadata) => ({ type: "session", metadata }),
-  projectEntry: (metadata, entry) => ({
-    type: "index_entry_ref",
-    sessionId: metadata.id,
-    entryId: entry.id,
-    seq: entry.seq,
-  }),
-});
+for await (const session of source.sessions({ cwd })) {
+  const metadata = await session.getMetadata();
+  await index.apply([{ type: "session", metadata }]);
+
+  for (const entry of await session.findEntries({ order: "oldestFirst" })) {
+    await index.apply([{
+      type: "index_entry_ref",
+      sessionId: metadata.id,
+      entryId: entry.id,
+      seq: entry.seq,
+    }]);
+  }
+}
 ```
 
-For document-oriented indexes, use the convenience feeder:
+The same readable session can expose facts for apps that want to index them:
 
 ```ts
-await feedSessionDocumentSnapshot(source, documentIndex);
+const name = await session.getName();
+const label = await session.getLabel(entry.id);
 ```
-
-which emits `session_metadata` and `entry_upsert` document feed items.
 
 Live indexing is also application-owned:
 
@@ -464,6 +467,10 @@ they are:
 - ignore labels and names for search.
 
 The harness should not prescribe this because UI search semantics differ by app.
+Readable storages already expose `getName()` and `getLabel(id)`; JSONL search
+sessions loaded through `jsonlSearchSessions()` expose the same methods without
+calling `repo.open()`. If an application wants name/label search, it should use
+those public storage reads and emit its own backend-owned search feed items.
 
 # 9. Error isolation
 
@@ -527,7 +534,11 @@ Use it through the source wrapper when feeding/scanning:
 
 ```ts
 const source = new JsonlSessionSearchSource({ fs, sessionsRoot });
-await feedSessionDocumentSnapshot(source, index, { listOptions: { cwd } });
+for await (const session of source.sessions({ cwd })) {
+  const metadata = await session.getMetadata();
+  const entries = await session.findEntries({ order: "oldestFirst" });
+  // index/apply backend-owned feed items here
+}
 ```
 
 It shares `fs` + `sessionsRoot` with `JsonlSessionRepo`, scans the same cwd
@@ -562,24 +573,21 @@ class ElasticSessionSearch implements IndexedSessionSearch<MyMetadata, ElasticIt
 Wire canonical sessions to that backend at app level:
 
 ```ts
-await feedSessionSnapshot(source, elastic, {
-  projectEntry: (metadata, entry) => ({
-    type: "upsert",
-    id: `${metadata.id}:${entry.id}`,
-    body: { sessionId: metadata.id, entryId: entry.id, text: JSON.stringify(entry) },
-  }),
-});
-```
-
-For document-style indexes, use the convenience helper instead:
-
-```ts
-await feedSessionDocumentSnapshot(source, documentIndex);
+for await (const session of source.sessions()) {
+  const metadata = await session.getMetadata();
+  for (const entry of await session.findEntries({ order: "oldestFirst" })) {
+    await elastic.apply([{
+      type: "upsert",
+      id: `${metadata.id}:${entry.id}`,
+      body: { sessionId: metadata.id, entryId: entry.id, text: JSON.stringify(entry) },
+    }]);
+  }
+}
 ```
 
 # 11. Package placement
 
-The shared agent package exports the small query/source/feed types, scanning
+The shared agent package exports the small query/source/index types, scanning
 search, and optional document helpers:
 
 ```ts
@@ -590,8 +598,6 @@ export type { SessionSearchDocument, SessionSearchDocumentFeedItem };
 export {
   createSessionListSearchSource,
   createScanningSessionSearch,
-  feedSessionSnapshot,
-  feedSessionDocumentSnapshot,
   JsonlSessionSearchSource,
   jsonlSearchSessions,
 };
