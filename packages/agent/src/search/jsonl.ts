@@ -7,8 +7,6 @@ import type {
 } from "../harness/session/jsonl/types.ts";
 import type { SessionSearchSource } from "./index.ts";
 
-export { listJsonlSessionMetadata };
-
 export async function* jsonlSearchSessions(
 	options: JsonlSessionRepoOptions,
 	query: JsonlSessionListOptions = {},

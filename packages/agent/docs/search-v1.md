@@ -175,7 +175,7 @@ interface SessionSearchOptions {
 interface SessionSearchHit<TMetadata extends SessionMetadata = SessionMetadata> {
   metadata: TMetadata;
   entryId: string;
-  timestamp: string;
+  timestamp: number;
   snippet?: string;
   score?: number;
 }
@@ -515,7 +515,7 @@ const scanSearch = createScanningSessionSearch(source);
 No `search()` method is added to the repo.
 
 For JSONL, the packaged source lives in the search module and is just the small
-loop over public JSONL listing/deserialization helpers:
+loop over public JSONL listing/deserialization helpers from the JSONL session module:
 
 ```ts
 for (const metadata of await listJsonlSessionMetadata({ fs, sessionsRoot }, { cwd })) {
@@ -592,6 +592,8 @@ export {
   createScanningSessionSearch,
   feedSessionSnapshot,
   feedSessionDocumentSnapshot,
+  JsonlSessionSearchSource,
+  jsonlSearchSessions,
 };
 ```
 

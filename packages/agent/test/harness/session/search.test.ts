@@ -97,7 +97,7 @@ class InMemoryIndexedSearch<TMetadata extends SessionMetadata> implements Docume
 			hits.push({
 				metadata: document.metadata,
 				entryId: document.entryId,
-				timestamp: new Date(document.timestamp).toISOString(),
+				timestamp: document.timestamp,
 				snippet: document.text,
 				score: 0,
 			});

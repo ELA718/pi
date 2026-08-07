@@ -174,14 +174,6 @@ function configureSqliteDatabase(db: SqliteDatabase): void {
 	db.exec("PRAGMA busy_timeout=5000");
 }
 
-function timestampToText(timestamp: number): string {
-	return new Date(timestamp).toISOString();
-}
-
-function timestampFromText(timestamp: string): number {
-	return Date.parse(timestamp);
-}
-
 function entryRowFromCached(row: CachedBranchEntryRow): EntryRow {
 	return { ...row, seq: row.entry_seq, type: row.type as Entry["type"] };
 }
@@ -197,9 +189,7 @@ function readObjectPayload(row: EntryRow): Record<string, unknown> {
 function decodeEntry(row: EntryRow): Entry {
 	try {
 		const payload = readObjectPayload(row);
-		const timestamp = timestampFromText(row.timestamp);
-		if (!Number.isFinite(timestamp)) throw new Error(`Invalid timestamp ${row.timestamp}`);
-		const base = { id: row.id, seq: row.seq, parentId: row.parent_id, timestamp };
+		const base = { id: row.id, seq: row.seq, parentId: row.parent_id, timestamp: row.timestamp };
 		switch (row.type) {
 			case "message":
 				if (typeof payload.message !== "object" || payload.message === null) throw new Error("Missing message");
@@ -282,14 +272,12 @@ function recordOpKind(record: NewRecord): string | undefined {
 	return record.type === "operation_started" ? record.intent.kind : undefined;
 }
 
-function decodeRecord(row: { seq: number; timestamp: string; payload: string }): LaneRecord {
+function decodeRecord(row: { seq: number; timestamp: number; payload: string }): LaneRecord {
 	try {
-		const timestamp = timestampFromText(row.timestamp);
-		if (!Number.isFinite(timestamp)) throw new Error(`Invalid timestamp ${row.timestamp}`);
 		return {
 			...(JSON.parse(row.payload) as object),
 			seq: row.seq,
-			timestamp,
+			timestamp: row.timestamp,
 		} as LaneRecord;
 	} catch (error) {
 		throw new SessionError(
@@ -470,7 +458,7 @@ class SqliteSessionStorage implements SessionStorage<SqliteSessionMetadata> {
 				id: committed.id,
 				parentId: committed.parentId,
 				type: committed.type,
-				timestamp: timestampToText(committed.timestamp),
+				timestamp: committed.timestamp,
 				payload: JSON.stringify(entryPayload(committed)),
 			});
 			setLaneLeaf(this.db, this.metadata.id, lane, committed.id);
@@ -508,7 +496,7 @@ class SqliteSessionStorage implements SessionStorage<SqliteSessionMetadata> {
 				runId: recordRunId(record),
 				type: record.type,
 				opKind: recordOpKind(record),
-				timestamp: timestampToText(committed.timestamp),
+				timestamp: committed.timestamp,
 				payload: JSON.stringify(record),
 			});
 			if (record.type === "operation_finished") {
@@ -712,7 +700,7 @@ export class SqliteSessionRepository
 			const lease = db.transaction(() => {
 				insertSessionRow(db, {
 					id,
-					createdAt: timestampToText(createdAt),
+					createdAt,
 					cwd: options.cwd,
 					parentSessionId: options.parentSessionId,
 					metadata: options.metadata,
@@ -843,7 +831,7 @@ export class SqliteSessionRepository
 				lease = db.transaction(() => {
 					insertSessionRow(db, {
 						id,
-						createdAt: timestampToText(createdAt),
+						createdAt,
 						cwd: options.cwd,
 						parentSessionId: options.parentSessionId ?? source.id,
 						metadata,

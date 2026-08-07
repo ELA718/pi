@@ -9,7 +9,7 @@ export interface RecordRow {
 	run_id: string | null;
 	type: string;
 	op_kind: string | null;
-	timestamp: string;
+	timestamp: number;
 	payload: string;
 }
 
@@ -20,7 +20,7 @@ export interface NewRecordRow {
 	runId?: string;
 	type: string;
 	opKind?: string;
-	timestamp: string;
+	timestamp: number;
 	payload: string;
 }
 

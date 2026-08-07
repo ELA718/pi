@@ -3,7 +3,7 @@ import type { SqliteDatabase, SqliteSessionMetadata } from "../types.ts";
 
 export interface SessionRow {
 	id: string;
-	created_at: string;
+	created_at: number;
 	metadata: string | null;
 	cwd: string;
 	parent_session_id: string | null;
@@ -13,7 +13,7 @@ export interface SessionRow {
 
 export interface NewSessionRow {
 	id: string;
-	createdAt: string;
+	createdAt: number;
 	cwd: string;
 	parentSessionId?: string;
 	metadata?: Record<string, unknown>;
@@ -133,7 +133,7 @@ export function decodeSessionMetadata(row: SessionRow, path: string): SqliteSess
 	const name = row.has_session_name === 0 ? undefined : parseSessionName(row.session_name, row.id);
 	return {
 		id: row.id,
-		createdAt: Date.parse(row.created_at),
+		createdAt: row.created_at,
 		...(name === undefined ? {} : { name }),
 		cwd: row.cwd,
 		path,

@@ -157,7 +157,7 @@ class SqliteSessionSearch implements IndexedSessionSearch<SqliteSessionMetadata,
 					ORDER BY score
 					LIMIT ?`,
 				)
-				.all<SessionRow & { entry_id: string; timestamp: string; score: number }>(
+				.all<SessionRow & { entry_id: string; timestamp: number; score: number }>(
 					query,
 					options.cwd ?? null,
 					options.cwd ?? null,

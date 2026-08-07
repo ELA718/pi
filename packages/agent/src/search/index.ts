@@ -1,6 +1,6 @@
 import type { Entry, SessionMetadata, SessionStorage } from "../harness/session/types.ts";
 
-export { JsonlSessionSearchSource, jsonlSearchSessions, listJsonlSessionMetadata } from "./jsonl.ts";
+export { JsonlSessionSearchSource, jsonlSearchSessions } from "./jsonl.ts";
 
 import { SessionError } from "../harness/session/types.ts";
 import type { FileError, Result } from "../harness/types.ts";
@@ -18,7 +18,7 @@ export interface SessionSearchOptions {
 export interface SessionSearchHit<TMetadata extends SessionMetadata = SessionMetadata> {
 	metadata: TMetadata;
 	entryId: string;
-	timestamp: string;
+	timestamp: number;
 	snippet?: string;
 	score?: number;
 }
@@ -210,7 +210,7 @@ class ScanningSessionSearch<TMetadata extends SessionMetadata = SessionMetadata,
 				hits.push({
 					metadata,
 					entryId: entry.id,
-					timestamp: new Date(entry.timestamp).toISOString(),
+					timestamp: entry.timestamp,
 					snippet: payload,
 				});
 				if (options.limit !== undefined && hits.length >= options.limit) return hits;
