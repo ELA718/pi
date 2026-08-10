@@ -149,6 +149,37 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 	);
 }
 
+async function emitAbortedAssistantMessage(
+	context: AgentContext,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+): Promise<AssistantMessage | undefined> {
+	if (!signal?.aborted) return undefined;
+	const message: AssistantMessage = {
+		role: "assistant",
+		content: [{ type: "text", text: "" }],
+		api: config.model.api,
+		provider: config.model.provider,
+		model: config.model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "aborted",
+		errorMessage: "Request was aborted before provider invocation",
+		timestamp: Date.now(),
+	};
+	context.messages.push(message);
+	await emit({ type: "message_start", message });
+	await emit({ type: "message_end", message });
+	return message;
+}
+
 /**
  * Main loop logic shared by agentLoop and agentLoopContinue.
  */
@@ -290,6 +321,8 @@ async function streamAssistantResponse(
 	if (config.transformContext) {
 		messages = await config.transformContext(messages, signal);
 	}
+	const contextAbort = await emitAbortedAssistantMessage(context, config, signal, emit);
+	if (contextAbort) return contextAbort;
 
 	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
 	const llmMessages = await config.convertToLlm(messages);
@@ -304,6 +337,9 @@ async function streamAssistantResponse(
 	// Resolve API key (important for expiring tokens)
 	const resolvedApiKey =
 		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
+
+	const credentialAbort = await emitAbortedAssistantMessage(context, config, signal, emit);
+	if (credentialAbort) return credentialAbort;
 
 	const response = await streamFunction(config.model, llmContext, {
 		...config,

@@ -8,7 +8,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { agentLoop, agentLoopContinue } from "../src/agent-loop.ts";
+import { agentLoop, agentLoopContinue, runAgentLoop, runAgentLoopContinue } from "../src/agent-loop.ts";
 import { setDefaultStreamFn } from "../src/index.ts";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.ts";
 
@@ -116,6 +116,57 @@ describe("default stream function compatibility", () => {
 });
 
 describe("agentLoop with AgentMessage", () => {
+	it("should not invoke the provider when agent_start aborts the run", async () => {
+		const controller = new AbortController();
+		let providerCalls = 0;
+		const events: AgentEvent[] = [];
+		const messages = await runAgentLoop(
+			[createUserMessage("Hello")],
+			{ systemPrompt: "", messages: [], tools: [] },
+			{ model: createModel(), convertToLlm: identityConverter },
+			async (event) => {
+				events.push(event);
+				if (event.type === "agent_start") controller.abort();
+			},
+			controller.signal,
+			() => {
+				providerCalls++;
+				throw new Error("Provider must not be invoked after abort");
+			},
+		);
+
+		expect(providerCalls).toBe(0);
+		expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+		expect(messages[1].role === "assistant" ? messages[1].stopReason : undefined).toBe("aborted");
+		expect(events.map((event) => event.type)).toContain("agent_end");
+	});
+
+	it("should not invoke the provider when transformContext aborts the run", async () => {
+		const controller = new AbortController();
+		let providerCalls = 0;
+		const messages = await runAgentLoop(
+			[createUserMessage("Hello")],
+			{ systemPrompt: "", messages: [], tools: [] },
+			{
+				model: createModel(),
+				convertToLlm: identityConverter,
+				transformContext: async (contextMessages) => {
+					controller.abort();
+					return contextMessages;
+				},
+			},
+			() => {},
+			controller.signal,
+			() => {
+				providerCalls++;
+				throw new Error("Provider must not be invoked after abort");
+			},
+		);
+
+		expect(providerCalls).toBe(0);
+		expect(messages[1].role === "assistant" ? messages[1].stopReason : undefined).toBe("aborted");
+	});
+
 	it("should emit events with AgentMessage types", async () => {
 		const context: AgentContext = {
 			systemPrompt: "You are helpful.",
@@ -1483,6 +1534,39 @@ describe("agentLoop with AgentMessage", () => {
 });
 
 describe("agentLoopContinue with AgentMessage", () => {
+	it("should persist a pre-provider abort in the reusable context", async () => {
+		const controller = new AbortController();
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [createUserMessage("Hello")],
+			tools: [],
+		};
+		let providerCalls = 0;
+		const messages = await runAgentLoopContinue(
+			context,
+			{
+				model: createModel(),
+				convertToLlm: identityConverter,
+				transformContext: async (contextMessages) => {
+					controller.abort();
+					return contextMessages;
+				},
+			},
+			() => {},
+			controller.signal,
+			() => {
+				providerCalls++;
+				throw new Error("Provider must not be invoked after abort");
+			},
+		);
+
+		expect(providerCalls).toBe(0);
+		expect(messages).toHaveLength(1);
+		expect(messages[0].role === "assistant" ? messages[0].stopReason : undefined).toBe("aborted");
+		expect(context.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+		expect(context.messages[1]).toBe(messages[0]);
+	});
+
 	it("should throw when context has no messages", () => {
 		const context: AgentContext = {
 			systemPrompt: "You are helpful.",
