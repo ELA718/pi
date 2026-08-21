@@ -693,7 +693,7 @@ Content`,
 	describe("npmCommand", () => {
 		it("should use npmCommand argv for npm installs", async () => {
 			settingsManager = SettingsManager.inMemory({
-				npmCommand: ["mise", "exec", "node@20", "--", "npm"],
+				npmCommand: ["mise", "exec", "node@24", "--", "npm"],
 			});
 			packageManager = new DefaultPackageManager({
 				cwd: tempDir,
@@ -709,7 +709,7 @@ Content`,
 				"mise",
 				[
 					"exec",
-					"node@20",
+					"node@24",
 					"--",
 					"npm",
 					"install",
@@ -983,7 +983,7 @@ Content`,
 
 		it("should use plain install through npmCommand argv when updating git package dependencies", async () => {
 			settingsManager = SettingsManager.inMemory({
-				npmCommand: ["mise", "exec", "node@20", "--", "pnpm"],
+				npmCommand: ["mise", "exec", "node@24", "--", "pnpm"],
 			});
 			packageManager = new DefaultPackageManager({
 				cwd: tempDir,
@@ -1014,14 +1014,14 @@ Content`,
 
 			await packageManager.update(source);
 
-			expect(runCommandSpy).toHaveBeenCalledWith("mise", ["exec", "node@20", "--", "pnpm", "install"], {
+			expect(runCommandSpy).toHaveBeenCalledWith("mise", ["exec", "node@24", "--", "pnpm", "install"], {
 				cwd: targetDir,
 			});
 		});
 
 		it("should use npmCommand argv for npm root lookup and invalidate cached root when npmCommand changes", () => {
 			settingsManager = SettingsManager.inMemory({
-				npmCommand: ["mise", "exec", "node@20", "--", "npm"],
+				npmCommand: ["mise", "exec", "node@24", "--", "npm"],
 			});
 			packageManager = new DefaultPackageManager({
 				cwd: tempDir,
@@ -1029,9 +1029,9 @@ Content`,
 				settingsManager,
 			});
 
-			const root20 = join(tempDir, "node20", "lib", "node_modules");
+			const root24 = join(tempDir, "node24", "lib", "node_modules");
 			const root22 = join(tempDir, "node22", "lib", "node_modules");
-			mkdirSync(join(root20, "@scope", "pkg"), { recursive: true });
+			mkdirSync(join(root24, "@scope", "pkg"), { recursive: true });
 
 			const runCommandSyncSpy = vi
 				.spyOn(packageManager as any, "runCommandSync")
@@ -1040,8 +1040,8 @@ Content`,
 					if (command !== "mise") {
 						throw new Error(`unexpected command ${command}`);
 					}
-					if (args[1] === "node@20") {
-						return root20;
+					if (args[1] === "node@24") {
+						return root24;
 					}
 					if (args[1] === "node@22") {
 						return root22;
@@ -1049,8 +1049,8 @@ Content`,
 					throw new Error(`unexpected args ${args.join(" ")}`);
 				});
 
-			expect(packageManager.getInstalledPath("npm:@scope/pkg", "user")).toBe(join(root20, "@scope", "pkg"));
-			expect(runCommandSyncSpy).toHaveBeenNthCalledWith(1, "mise", ["exec", "node@20", "--", "npm", "root", "-g"]);
+			expect(packageManager.getInstalledPath("npm:@scope/pkg", "user")).toBe(join(root24, "@scope", "pkg"));
+			expect(runCommandSyncSpy).toHaveBeenNthCalledWith(1, "mise", ["exec", "node@24", "--", "npm", "root", "-g"]);
 
 			settingsManager.setNpmCommand(["mise", "exec", "node@22", "--", "npm"]);
 
@@ -1150,7 +1150,7 @@ Content`,
 
 		it("should resolve wrapped pnpm global package paths from pnpm list output", () => {
 			settingsManager = SettingsManager.inMemory({
-				npmCommand: ["mise", "exec", "node@20", "--", "pnpm"],
+				npmCommand: ["mise", "exec", "node@24", "--", "pnpm"],
 			});
 			packageManager = new DefaultPackageManager({
 				cwd: tempDir,
@@ -1165,7 +1165,7 @@ Content`,
 			vi.spyOn(packageManager as any, "runCommandSync").mockImplementation((...callArgs: unknown[]) => {
 				const [command, args] = callArgs as [string, string[]];
 				expect(command).toBe("mise");
-				if (args.join(" ") === "exec node@20 -- pnpm list -g --depth 0 --json") {
+				if (args.join(" ") === "exec node@24 -- pnpm list -g --depth 0 --json") {
 					return JSON.stringify([{ path: pnpmRoot, dependencies: { "pnpm-pkg": { path: packagePath } } }]);
 				}
 				throw new Error(`unexpected args ${args.join(" ")}`);
@@ -2538,7 +2538,7 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 
 		it("should use npmCommand argv for npm update checks", async () => {
 			settingsManager = SettingsManager.inMemory({
-				npmCommand: ["mise", "exec", "node@20", "--", "npm"],
+				npmCommand: ["mise", "exec", "node@24", "--", "npm"],
 			});
 			packageManager = new DefaultPackageManager({
 				cwd: tempDir,
@@ -2552,7 +2552,7 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 			expect(latest).toBe("1.2.3");
 			expect(runCommandCaptureSpy).toHaveBeenCalledWith(
 				"mise",
-				["exec", "node@20", "--", "npm", "view", "@scope/pkg", "version", "--json"],
+				["exec", "node@24", "--", "npm", "view", "@scope/pkg", "version", "--json"],
 				expect.objectContaining({ cwd: tempDir }),
 			);
 		});

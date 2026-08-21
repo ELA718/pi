@@ -69,7 +69,7 @@ Example:
 
 ```json
 {
-  "npmCommand": ["mise", "exec", "node@20", "--", "npm"]
+  "npmCommand": ["mise", "exec", "node@24", "--", "npm"]
 }
 ```
 
