@@ -4,6 +4,9 @@ See [AGENTS.md](https://github.com/earendil-works/pi-mono/blob/main/AGENTS.md) f
 
 ## Setup
 
+Development uses Node 24.18.1 from the repository root `.node-version` file.
+Published packages continue to support Node 22.19.0 and newer.
+
 ```bash
 git clone https://github.com/earendil-works/pi-mono
 cd pi-mono
